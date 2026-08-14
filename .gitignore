@@ -1,0 +1,30 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+data/
+!data/.gitkeep
+qdrant_storage/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+Thumbs.db
+_bootstrap.tar.gz
+
+# OAuth tokens and client secrets — never commit these.
+secrets/*
+!secrets/README.md
+data/mail-tokens/
+
+# scratch vault used to exercise the MCP server
+test-vault/
+
+# transfer scratch
+_to_delete/

@@ -1,0 +1,50 @@
+# Local services for the Yoyo laptop stack (Docker Desktop, WSL2 backend).
+#
+# Inference is NOT here — it lives on MyAIServer and is reached over Tailscale.
+# Nothing in this file needs a GPU.
+#
+#   docker compose up -d
+#   docker compose ps
+
+services:
+  qdrant:
+    # Pinned in lockstep with qdrant-client in pyproject.toml. Bump both together.
+    image: qdrant/qdrant:v1.12.4
+    container_name: yoyo-qdrant
+    restart: unless-stopped
+    ports:
+      # Bound to loopback only. This is a laptop, not a server.
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__ENABLE_TLS=false
+      - QDRANT__LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.6.5
+    container_name: yoyo-webui
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:8080"
+    volumes:
+      - openwebui_data:/app/backend/data
+    environment:
+      # Point Open WebUI straight at MyAIServer's LiteLLM. Set these in .env.
+      - OPENAI_API_BASE_URL=${YOYO_LLM_BASE_URL}
+      - OPENAI_API_KEY=${YOYO_LLM_API_KEY}
+      # No Ollama on this machine.
+      - ENABLE_OLLAMA_API=false
+      - WEBUI_AUTH=true
+    depends_on:
+      - qdrant
+
+volumes:
+  qdrant_storage:
+  openwebui_data:

@@ -1,0 +1,90 @@
+# Yoyo model configuration.
+#
+# Yoyo code names a ROLE. This file maps roles to the endpoint CAPABILITY names that
+# MyAIServer exposes (`agent`, `fast`). Model identity is a server-side concern and is
+# recorded here as a comment only — never referenced in code.
+#
+# Verified against LiteLLM 2026-08-14: the endpoint serves exactly `agent` and `fast`.
+#
+# ┌─ HARD CONSTRAINT ────────────────────────────────────────────────────────────┐
+# │ `fast` (qwen3.6) MUST NEVER be given tools. Measured over four trials: 3/4    │
+# │ called the tool once, errored, and gave up; 1/4 did not call it at all and    │
+# │ fabricated a plausible answer (invented a stock price, with a confident       │
+# │ caveat). A fabricated answer that looks right is worse than a refusal.        │
+# │ Any role with tools: true MUST point at `agent`. Enforced in llm.py — a       │
+# │ violation raises, it does not warn.                                           │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+endpoint:
+  base_url_env: YOYO_LLM_BASE_URL
+  api_key_env: YOYO_LLM_API_KEY
+  # Server-side timeout is 900 s. The client timeout must be >= that.
+  context_ceiling: 32768   # HARD server cap, regardless of what a model advertises
+
+roles:
+  # --- tool-capable: must be `agent` -----------------------------------------
+  supervisor:
+    endpoint: agent        # muse-glimmer, 27.9B dense Q4_K_M, ~12 tok/s
+    tools: true            # HARD: tools => agent. See constraint above.
+    reasoning: high
+    max_tokens: 8192
+    temperature: 0.4
+    notes: "Planning, multi-step tasks, anything agentic. Only capability that scales under concurrency (3.62x @ conc=4)."
+
+  worker:
+    endpoint: agent
+    tools: true            # HARD: tools => agent
+    reasoning: low         # low cut tokens ~38% (785 -> 485) at the same tok/s
+    max_tokens: 8192
+    temperature: 0.2
+    notes: "Tool-using worker turns. Reserve `high` reasoning for the supervisor."
+
+  # --- closed-context, no tools ----------------------------------------------
+  summarize:
+    endpoint: fast         # qwen3.6, 35B-A3B MoE, ~76 tok/s
+    tools: false           # HARD: never true
+    max_tokens: 4096
+    temperature: 0.3
+    notes: "Summarise supplied text. Does not serialise-scale (1.13x @ conc=4) — no fan-out."
+
+  extract:
+    endpoint: fast
+    tools: false           # HARD: never true
+    max_tokens: 4096
+    temperature: 0.1
+    notes: "Structured extraction from supplied text."
+
+  answer:
+    endpoint: fast
+    tools: false           # HARD: never true
+    max_tokens: 4096
+    temperature: 0.3
+    notes: "Answer from retrieved chunks. The default RAG turn."
+
+# --- embeddings ---------------------------------------------------------------
+# NOT exposed on MyAIServer. bge-m3 and bge-reranker-v2-m3 are named in the plan but
+# not deployed. Running locally on the laptop until that changes — sanctioned by the
+# handoff (§6). Flipping to `provider: server` is a yaml edit plus a full reindex.
+embeddings:
+  provider: local              # local | server
+  local_model: BAAI/bge-base-en-v1.5
+  dimensions: 768
+  # When provider: server —
+  #   endpoint: embed          (register this name in LiteLLM and grant the key access)
+  #   dimensions: 1024         (bge-m3)
+  notes: "Changing the model or provider invalidates the whole corpus: yoyo reindex --recreate."
+
+reranking:
+  enabled: false
+  notes: "bge-reranker-v2-m3 not deployed. Fusion order stands until it is."
+
+retrieval:
+  chunk_size: 1200
+  chunk_overlap: 150
+  dense_top_k: 20
+  sparse_top_k: 20
+  final_top_k: 6               # ADR-007
+  rrf_k: 60
+  # Context budget must fit inside the 32K server ceiling INCLUDING the reasoning
+  # trace, which is on by default and can run to hundreds of tokens on a trivial turn.
+  max_context_chars: 24000

@@ -1,0 +1,34 @@
+# Mail accounts. Read and draft only — Yoyo has no send path.
+#
+#   yoyo mail accounts          show configuration and auth status
+#   yoyo mail auth <name>       run the OAuth consent flow in a browser
+#
+# Tokens are cached under data/mail-tokens/. They are long-lived credentials to an entire
+# mailbox. The laptop disk is currently unencrypted (OQ4) — this is an accepted risk,
+# recorded in the ledger, not an oversight.
+
+accounts:
+  # --- Gmail -----------------------------------------------------------------
+  # 1. Google Cloud Console -> APIs & Services -> Enable the Gmail API
+  # 2. Credentials -> Create OAuth client ID -> Application type: Desktop app
+  # 3. Download the JSON, save it as secrets/gmail-personal.json
+  # 4. Add yourself as a test user on the OAuth consent screen
+  personal:
+    provider: gmail
+    client_secrets: secrets/gmail-personal.json
+    enabled: false
+    description: Personal Gmail
+
+  # --- Microsoft 365 ---------------------------------------------------------
+  # 1. Entra admin center -> App registrations -> New registration
+  # 2. Supported account types: whichever matches your tenant
+  # 3. Authentication -> Advanced -> Allow public client flows: YES (device code)
+  # 4. API permissions -> Microsoft Graph -> Delegated -> Mail.Read, Mail.ReadWrite
+  #    Do NOT add Mail.Send. Yoyo must not be able to send.
+  # 5. Copy the Application (client) ID below
+  work:
+    provider: microsoft
+    client_id: REPLACE-WITH-APPLICATION-ID
+    tenant: common
+    enabled: false
+    description: Microsoft 365 work mail

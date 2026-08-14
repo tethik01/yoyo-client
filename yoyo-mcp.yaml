@@ -1,0 +1,35 @@
+# MCP servers Yoyo mounts as a client.
+#
+# Each entry becomes a set of tools in Yoyo's registry, named "<prefix>_<remote tool>".
+# Tools appear to the agent exactly like built-ins — nothing above the registry knows the
+# difference.
+#
+#   yoyo mcp list        show configured servers and their tools
+#   yoyo tools           the full registry, built-ins plus mounted
+#
+# Failure to mount one server does not prevent the others from mounting.
+
+servers:
+  # First-party: the Obsidian vault. Read anywhere in the vault, write only to drafts.
+  # Set YOYO_VAULT_PATH in .env, then flip enabled to true.
+  vault:
+    command: python
+    args: ["-m", "yoyo.mcp.vault_server"]
+    enabled: true
+    prefix: vault
+
+  # Mail: Gmail and Microsoft 365, read + draft only. Configure accounts in
+  # yoyo-mail.yaml and authenticate with `yoyo mail auth <name>` before enabling.
+  mail:
+    command: python
+    args: ["-m", "yoyo.mcp.mail_server"]
+    enabled: false
+    prefix: mail
+
+  # Off-the-shelf example: the reference filesystem server, scoped to one folder.
+  # Requires Node. Uncomment and set a real path to use it.
+  # files:
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Projects"]
+  #   enabled: false
+  #   prefix: fs
