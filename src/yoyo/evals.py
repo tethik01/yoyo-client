@@ -38,6 +38,12 @@ EVAL_FILE = REPO_ROOT / "evals" / "golden.yaml"
 # Phrase matching is a weak instrument for "did the model abstain". It is used here only
 # as the *soft* half of the gate; the hard half is `must_not_contain`, which catches the
 # thing that actually matters — asserting a specific fact the corpus does not support.
+#: Citations the model constructed rather than copied. Defined in `citations` and re-exported
+#: here so the gate and the interactive scrubber can never drift apart. The gate FAILS on a
+#: fabricated link even though the interactive path strips it — see citations.py.
+from .citations import FABRICATED_LINK, fabricated_links  # noqa: E402,F401
+
+
 ABSTAIN_MARKERS = [
     "not in the",
     "no information",
@@ -156,10 +162,20 @@ def _probe_registry(secret: str, fail_first: bool = False) -> Registry:
 # ------------------------------------------------------------------ runners ---
 
 
+#: Set by run(role_override=...) so one gate set can judge several candidate models.
+#: A module-level override rather than threading a parameter through every runner — the
+#: runners are dispatched by table and all of them need it.
+_ROLE_OVERRIDE: str | None = None
+
+
+def _role_for(case: dict[str, Any], default: str) -> str:
+    return _ROLE_OVERRIDE or case.get("role", default)
+
+
 def _run_tool_case(case: dict[str, Any], fail_first: bool) -> CaseResult:
     secret = str(case.get("secret", "QX-4417-ZULU"))
     reg = _probe_registry(secret, fail_first=fail_first)
-    role = case.get("role", "supervisor")
+    role = _role_for(case, "supervisor")
 
     try:
         result = agent.run(
@@ -200,7 +216,7 @@ def _run_grounded_case(case: dict[str, Any]) -> CaseResult:
     from . import core
 
     try:
-        answer = core.ask(case["prompt"], role=case.get("role", "answer"))
+        answer = core.ask(case["prompt"], role=_role_for(case, "answer"))
     except Exception as exc:  # noqa: BLE001
         return CaseResult(case["id"], case["kind"], False, f"raised: {exc}")
 
@@ -217,10 +233,13 @@ def _run_grounded_case(case: dict[str, Any]) -> CaseResult:
     must = [s.lower() for s in case.get("must_contain", [])]
     missing = [s for s in must if s not in (answer.text or "").lower()]
 
-    passed = bool(good) and not missing
+    invented = fabricated_links(answer.text)
+    passed = bool(good) and not missing and not invented
     detail = f"cited {sorted(good) or 'nothing valid'} of {sorted(valid_ids)}"
     if missing:
         detail += f"; missing expected content: {missing}"
+    if invented:
+        detail += f"; FABRICATED CITATION PATH: {invented}"
     if not passed:
         detail += f" | answer: {(answer.text or '')[:300].strip()!r}"
     return CaseResult(
@@ -232,7 +251,7 @@ def _run_abstain_case(case: dict[str, Any]) -> CaseResult:
     from . import core
 
     try:
-        answer = core.ask(case["prompt"], role=case.get("role", "answer"))
+        answer = core.ask(case["prompt"], role=_role_for(case, "answer"))
     except Exception as exc:  # noqa: BLE001
         return CaseResult(case["id"], case["kind"], False, f"raised: {exc}")
 
@@ -260,7 +279,7 @@ def _run_abstain_case(case: dict[str, Any]) -> CaseResult:
 
 def _run_no_tools_case(case: dict[str, Any]) -> CaseResult:
     """A no-tools role must answer from supplied context and must never receive tools."""
-    role = case.get("role", "summarize")
+    role = _role_for(case, "summarize")
     try:
         result = llm.chat(
             [
@@ -308,10 +327,21 @@ def run(
     only: list[str] | None = None,
     on_start=None,  # noqa: ANN001
     on_result=None,  # noqa: ANN001
+    role_override: str | None = None,
 ) -> EvalReport:
     """Run the set. Cases are slow (agent turns are 30-60 s each), so the callbacks let a
     caller report progress rather than leaving the user staring at nothing for five
     minutes wondering whether it has hung."""
+    global _ROLE_OVERRIDE  # noqa: PLW0603
+    previous = _ROLE_OVERRIDE
+    _ROLE_OVERRIDE = role_override
+    try:
+        return _run_cases(path, only, on_start, on_result)
+    finally:
+        _ROLE_OVERRIDE = previous
+
+
+def _run_cases(path, only, on_start, on_result) -> EvalReport:  # noqa: ANN001
     report = EvalReport()
     cases = [
         c

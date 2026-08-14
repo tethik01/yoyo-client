@@ -209,12 +209,17 @@ def test_tools_are_actually_passed_to_the_model(monkeypatch):
 
 
 def test_agent_uses_a_tool_capable_role_by_default():
-    """The default must not be a role the tool guard would reject."""
-    from yoyo.config import get_models
+    """The default must not be a role the tool guard would reject.
+
+    Asserts the PROPERTY (tool-capable, not a fabricating endpoint), not which model is
+    currently pinned. The previous version asserted `endpoint == "agent"` and broke the
+    moment a better model was promoted — a test that fails on an intended change is noise.
+    """
+    from yoyo.config import NO_TOOLS_ENDPOINTS, get_models
 
     role = get_models().role("supervisor")
     assert role.tools is True
-    assert role.endpoint == "agent"
+    assert role.endpoint not in NO_TOOLS_ENDPOINTS
 
 
 def test_budget_exhaustion_still_produces_an_answer(monkeypatch):
@@ -283,3 +288,260 @@ def test_no_forced_answer_when_no_tools_were_ever_called(monkeypatch):
     _scripted(monkeypatch, [{"text": ""}])
     r = agent.run("q", max_iterations=1, tool_registry=_registry())
     assert "partial results" not in r.stopped_because
+
+
+# ------------------------------------------------- duplicate-call guard ----
+# Observed live: workers reworded the same search three or four times and burned their whole
+# budget. Prompting them not to did not work; this is the mechanical fix.
+
+
+def test_reworded_duplicate_is_short_circuited(monkeypatch):
+    hits = {"n": 0}
+
+    def counting(args):
+        hits["n"] += 1
+        return {"echoed": args.value}
+
+    _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("echo", '{"value": "GB10 box"}', "c1")]},
+            {"tool_calls": [_call("echo", '{"value": "box  GB10!"}', "c2")]},
+            {"text": "done"},
+        ],
+    )
+    r = agent.run("q", tool_registry=_registry(counting))
+
+    assert hits["n"] == 1, "the reworded repeat must not re-execute the tool"
+    assert len(r.invocations) == 2, "but it is still recorded as a call the model made"
+    assert all(i.ok for i in r.invocations)
+
+
+def test_duplicate_result_is_labelled_as_a_repeat(monkeypatch):
+    """A silently cached result looks like a fresh search that found the same thing."""
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("echo", '{"value": "a"}', "c1")]},
+            {"tool_calls": [_call("echo", '{"value": "a"}', "c2")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_registry())
+    tool_msgs = [m for m in seen[-1]["messages"] if m["role"] == "tool"]
+    assert "already made this exact call" in tool_msgs[-1]["content"]
+
+
+def test_different_queries_are_not_treated_as_duplicates(monkeypatch):
+    hits = {"n": 0}
+
+    def counting(args):
+        hits["n"] += 1
+        return {"echoed": args.value}
+
+    _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("echo", '{"value": "invoice from alice"}', "c1")]},
+            {"tool_calls": [_call("echo", '{"value": "quarterly review"}', "c2")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_registry(counting))
+    assert hits["n"] == 2
+
+
+def test_overusing_one_tool_adds_a_stop_hint(monkeypatch):
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("echo", '{"value": "one"}', "c1")]},
+            {"tool_calls": [_call("echo", '{"value": "two"}', "c2")]},
+            {"tool_calls": [_call("echo", '{"value": "three"}', "c3")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_registry())
+    tool_msgs = [m for m in seen[-1]["messages"] if m["role"] == "tool"]
+    assert "3 times this turn" in tool_msgs[-1]["content"]
+
+
+def test_no_stop_hint_before_the_limit(monkeypatch):
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("echo", '{"value": "one"}', "c1")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_registry())
+    tool_msgs = [m for m in seen[-1]["messages"] if m["role"] == "tool"]
+    assert "times this turn" not in tool_msgs[-1]["content"]
+
+
+def test_cache_does_not_leak_between_turns(monkeypatch):
+    """Relevance is scoped to one question; a stale answer to a new question is worse
+    than a repeated search."""
+    hits = {"n": 0}
+
+    def counting(args):
+        hits["n"] += 1
+        return {"echoed": args.value}
+
+    reg = _registry(counting)
+    for _ in range(2):
+        _scripted(
+            monkeypatch,
+            [{"tool_calls": [_call("echo", '{"value": "same"}')]}, {"text": "done"}],
+        )
+        agent.run("q", tool_registry=reg)
+    assert hits["n"] == 2
+
+
+def test_failed_calls_are_not_cached(monkeypatch):
+    """A transient failure must be retryable — that is the whole point of the retry gate."""
+    calls = {"n": 0}
+
+    def flaky(args):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ToolError("transient")
+        return {"echoed": args.value}
+
+    _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("echo", '{"value": "x"}', "c1")]},
+            {"tool_calls": [_call("echo", '{"value": "x"}', "c2")]},
+            {"text": "recovered"},
+        ],
+    )
+    r = agent.run("q", tool_registry=_registry(flaky))
+    assert calls["n"] == 2, "the retry must actually re-execute"
+    assert r.invocations[0].ok is False
+    assert r.invocations[1].ok is True
+
+
+# ------------------------------------------- source tunnelling (2026-08-15) ----
+# Regression class observed live: asked a two-part question, the model called vault_search
+# four times with reworded queries, never called search_corpus, and reported the second half
+# as "could not find any mention" when the answer was in the corpus. The existing brakes did
+# not catch it — the calls were not duplicates (different wording, different results) and the
+# stop hint fires at 3, which is the wrong advice anyway when half the question is unanswered.
+
+
+def _two_source_registry():
+    reg = Registry()
+    for name in ("vault_search", "search_corpus"):
+        reg.add(
+            Tool(
+                name=name,
+                description=f"{name} description",
+                params=EchoArgs,
+                fn=lambda a, n=name: {"from": n, "hit": a.value},
+            )
+        )
+    return reg
+
+
+def _last_tool_content(seen):
+    return [m for m in seen[-1]["messages"] if m["role"] == "tool"][-1]["content"]
+
+
+def test_second_call_to_one_source_names_the_untried_source(monkeypatch):
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("vault_search", '{"value": "GB10 box"}', "c1")]},
+            {"tool_calls": [_call("vault_search", '{"value": "bake-off"}', "c2")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_two_source_registry())
+    assert "search_corpus" in _last_tool_content(seen)
+
+
+def test_the_hint_does_not_name_the_tool_already_being_used(monkeypatch):
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("vault_search", '{"value": "a"}', "c1")]},
+            {"tool_calls": [_call("vault_search", '{"value": "b"}', "c2")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_two_source_registry())
+    content = _last_tool_content(seen)
+    assert "not yet tried: search_corpus" in content
+
+
+def test_no_hint_when_every_source_has_been_used(monkeypatch):
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("search_corpus", '{"value": "a"}', "c1")]},
+            {"tool_calls": [_call("vault_search", '{"value": "b"}', "c2")]},
+            {"tool_calls": [_call("vault_search", '{"value": "c"}', "c3")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_two_source_registry())
+    assert "not yet tried" not in _last_tool_content(seen)
+
+
+def test_first_call_carries_no_hint(monkeypatch):
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("vault_search", '{"value": "a"}', "c1")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_two_source_registry())
+    assert "not yet tried" not in _last_tool_content(seen)
+
+
+def test_stop_hint_still_wins_at_the_hard_limit(monkeypatch):
+    """At 3 calls the advice must be 'stop', not 'try elsewhere' — otherwise the two nudges
+    fight each other and the budget goes on searching instead of answering."""
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("vault_search", '{"value": "a"}', "c1")]},
+            {"tool_calls": [_call("vault_search", '{"value": "b"}', "c2")]},
+            {"tool_calls": [_call("vault_search", '{"value": "c"}', "c3")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_two_source_registry())
+    content = _last_tool_content(seen)
+    assert "3 times this turn" in content
+    assert "not yet tried" not in content
+
+
+# ------------------------------------------ fabricated citations in answers ----
+
+
+def test_fabricated_path_is_stripped_from_the_answer(monkeypatch):
+    _scripted(
+        monkeypatch,
+        [{"text": "See [MyAIServer.md](file:///Users/nobody/Vault/MyAIServer.md) for detail."}],
+    )
+    result = agent.run("q", tool_registry=_two_source_registry())
+    assert "file:///" not in result.text
+    assert "[MyAIServer.md]" in result.text
+    assert result.fabricated_links == ["file:///"]
+
+
+def test_clean_answer_reports_no_fabrication(monkeypatch):
+    _scripted(monkeypatch, [{"text": "See [MyAIServer.md] and chunk [7]."}])
+    result = agent.run("q", tool_registry=_two_source_registry())
+    assert result.fabricated_links == []
+    assert result.text == "See [MyAIServer.md] and chunk [7]."
+
+
+def test_prompt_forbids_reporting_absence_from_one_source():
+    """The wrong answer was a scope error, not a lookup error: 'not in the notes' was
+    reported as 'not there'. The prompt has to name that distinction explicitly."""
+    assert "is not the same claim as" in agent.SYSTEM_PROMPT
+    assert "several parts" in agent.SYSTEM_PROMPT

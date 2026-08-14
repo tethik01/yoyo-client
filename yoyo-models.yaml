@@ -4,7 +4,7 @@
 # MyAIServer exposes (`agent`, `fast`). Model identity is a server-side concern and is
 # recorded here as a comment only — never referenced in code.
 #
-# Verified against LiteLLM 2026-08-14: the endpoint serves exactly `agent` and `fast`.
+# Verified against LiteLLM 2026-08-15: the endpoint serves `agent`, `coder` and `fast`.
 #
 # ┌─ HARD CONSTRAINT ────────────────────────────────────────────────────────────┐
 # │ `fast` (qwen3.6) MUST NEVER be given tools. Measured over four trials: 3/4    │
@@ -22,44 +22,100 @@ endpoint:
   context_ceiling: 32768   # HARD server cap, regardless of what a model advertises
 
 roles:
-  # --- tool-capable: must be `agent` -----------------------------------------
+  # --- tool-capable ------------------------------------------------------------
+  # PROMOTED 2026-08-15 (ADR-027): qwen3-coder-next passed all four hard gates 7/7 and
+  # runs at 50 tok/s against agent's 11.7 — 4.3x faster single-stream, and no thinking
+  # tokens to pay for. It SERIALISES (1.09x @ 4) where agent scales (3.76x), which costs
+  # the graph its fan-out benefit but not the single-agent path, where nearly all real
+  # use lives.
   supervisor:
-    endpoint: agent        # muse-glimmer, 27.9B dense Q4_K_M, ~12 tok/s
-    tools: true            # HARD: tools => agent. See constraint above.
+    endpoint: coder        # qwen3-coder-next, 80B-A3B MoE, ~50 tok/s, no thinking mode
+    tools: true
+    max_tokens: 8192
+    temperature: 0.4
+    notes: "Planning and agentic turns. Serialises — do not fan out expecting speed."
+
+  worker:
+    endpoint: coder
+    tools: true
+    max_tokens: 8192
+    temperature: 0.2
+    notes: "Tool-using worker turns."
+
+  # Fallback: muse-glimmer. Slower (11.7 tok/s) but supports controllable thinking and is
+  # the ONLY capability measured to scale under concurrency (3.76x @ 4). Keep for work that
+  # needs deep reasoning, or genuine parallel fan-out.
+  agent_supervisor:
+    endpoint: agent
+    tools: true
     reasoning: high
     max_tokens: 8192
     temperature: 0.4
-    notes: "Planning, multi-step tasks, anything agentic. Only capability that scales under concurrency (3.62x @ conc=4)."
+    notes: "Fallback. Slower but scales under concurrency and supports thinking."
 
-  worker:
+  agent_worker:
     endpoint: agent
-    tools: true            # HARD: tools => agent
-    reasoning: low         # low cut tokens ~38% (785 -> 485) at the same tok/s
+    tools: true
+    reasoning: low
     max_tokens: 8192
     temperature: 0.2
-    notes: "Tool-using worker turns. Reserve `high` reasoning for the supervisor."
+    notes: "Fallback worker."
+
+  # --- candidate: Qwen3-Coder-Next (80B total, 3B ACTIVE) ---------------------
+  # Not "bigger" — SPARSER. Same active-parameter count as `fast` (3B), so on this
+  # bandwidth-bound box it should generate at roughly `fast` speed (~76 tok/s) rather than
+  # `agent` speed (~12). If it also passes the tool-fidelity gates it fills the gap in the
+  # lineup: fast AND tool-reliable.
+  #
+  # Enable only after ALL of:
+  #   1. registered in LiteLLM on MyAIServer as capability `coder`
+  #   2. `yoyo eval --role coder_supervisor` passes all four hard gates
+  #   3. `yoyo bench --role coder_supervisor --concurrency 1,4` measured — being MoE
+  #      predicts NOTHING about scaling (qwen3.6 is MoE and serialises at 1.13x)
+  # NOTE: qwen3-coder-next has NO thinking mode. Sending a reasoning parameter makes
+  # Ollama return 500 ("does not support thinking") — never set `reasoning` on a coder role.
 
   # --- closed-context, no tools ----------------------------------------------
+  # MOVED to `coder` 2026-08-15. `fast` is nominally quicker (76 vs 50 tok/s) and ~2.7x
+  # SLOWER in practice, because thinking is on and it spends its output on reasoning
+  # traces. Measured on identical eval cases, same day:
+  #     grounded-concurrency    coder 8.5s   fast 23.0s
+  #     grounded-tool-constraint coder 6.9s  fast 16.5s
+  #     abstain-unknown         coder 4.8s   fast 12.3s
+  # `coder` passed the grounded and abstain gates before being trusted with these.
+  #
+  # REVISIT once `think: false` is set on `fast` server-side (a pending loose end from
+  # day one). That may make `fast` genuinely fast and worth reclaiming for prose, since
+  # `coder` is coding-tuned and its long-form writing is less proven than its retrieval.
   summarize:
-    endpoint: fast         # qwen3.6, 35B-A3B MoE, ~76 tok/s
+    endpoint: coder
     tools: false           # HARD: never true
     max_tokens: 4096
     temperature: 0.3
-    notes: "Summarise supplied text. Does not serialise-scale (1.13x @ conc=4) — no fan-out."
+    notes: "Summarise supplied text."
 
   extract:
-    endpoint: fast
+    endpoint: coder
     tools: false           # HARD: never true
     max_tokens: 4096
     temperature: 0.1
     notes: "Structured extraction from supplied text."
 
   answer:
-    endpoint: fast
+    endpoint: coder
     tools: false           # HARD: never true
     max_tokens: 4096
     temperature: 0.3
-    notes: "Answer from retrieved chunks. The default RAG turn."
+    notes: "Answer from retrieved chunks. The default RAG turn — the hottest path."
+
+  # Fallback: qwen3.6. Slower in practice until think:false lands, but not coding-tuned,
+  # so keep it reachable for long-form prose where that might matter.
+  answer_fast:
+    endpoint: fast
+    tools: false           # HARD: never true — qwen3.6 fabricates around tools
+    max_tokens: 4096
+    temperature: 0.3
+    notes: "Fallback prose model. Compare against `answer` once think:false is set."
 
 # --- embeddings ---------------------------------------------------------------
 # NOT exposed on MyAIServer. bge-m3 and bge-reranker-v2-m3 are named in the plan but

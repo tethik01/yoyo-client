@@ -21,6 +21,7 @@ Rules:
   labelled as such. Do not blend the two silently.
 - If a tool is available and relevant, call it. Never fabricate a result you could have
   looked up — an unavailable answer is better than an invented one.
+- Cite source ids exactly as given. Never construct file paths, URLs or links.
 - Be concise. No preamble."""
 
 

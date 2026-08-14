@@ -193,3 +193,252 @@ def test_failed_abstain_case_reports_the_answer_text(monkeypatch):
     )
     assert not r.passed
     assert "12 March 2027" in r.detail
+
+
+# --------------------------------------------- candidate-model comparison ----
+# One gate set must be able to judge several candidate models, or comparing them means
+# hand-editing yaml between runs and trusting yourself not to forget.
+
+
+def test_role_override_applies_to_tool_cases(monkeypatch):
+    seen = {}
+
+    def fake_agent_run(prompt, **kw):
+        seen["role"] = kw.get("role")
+
+        class R:
+            text = "QX-4417-ZULU"
+            tools_called = ["get_sensor_reading"]
+            iterations = 1
+            latency_ms = 1
+            stopped_because = "completed"
+
+            def called(self, n):
+                return True
+
+        return R()
+
+    monkeypatch.setattr(evals.agent, "run", fake_agent_run)
+    evals.run(only=["fidelity-basic"], role_override="agent_supervisor")
+    assert seen["role"] == "agent_supervisor"
+
+
+def test_role_override_is_restored_afterwards(monkeypatch):
+    """A leaked override would silently judge later runs against the wrong model."""
+
+    def fake_agent_run(prompt, **kw):
+        class R:
+            text = ""
+            tools_called = []
+            iterations = 1
+            latency_ms = 1
+            stopped_because = "completed"
+
+            def called(self, n):
+                return False
+
+        return R()
+
+    monkeypatch.setattr(evals.agent, "run", fake_agent_run)
+    evals.run(only=["fidelity-basic"], role_override="agent_supervisor")
+    assert evals._ROLE_OVERRIDE is None
+
+
+def test_without_override_the_case_role_is_used(monkeypatch):
+    seen = {}
+
+    def fake_agent_run(prompt, **kw):
+        seen["role"] = kw.get("role")
+
+        class R:
+            text = ""
+            tools_called = []
+            iterations = 1
+            latency_ms = 1
+            stopped_because = "completed"
+
+            def called(self, n):
+                return False
+
+        return R()
+
+    monkeypatch.setattr(evals.agent, "run", fake_agent_run)
+    evals.run(only=["worker-fidelity-low-reasoning"])
+    assert seen["role"] == "worker"
+
+
+def test_unserved_capability_is_caught_before_burning_cases(monkeypatch, capsys):
+    """Seven identical 403s is seven times less useful than one explanation."""
+    import typer
+
+    from yoyo import cli
+
+    monkeypatch.setattr(cli, "console", cli.Console(force_terminal=False))
+    monkeypatch.setattr("yoyo.llm.list_models", lambda: ["agent", "fast"])
+
+    # `supervisor` maps to `coder`, which this fake server does not serve.
+    with pytest.raises(typer.Exit) as exc:
+        cli._require_served("supervisor")
+    assert exc.value.exit_code == 2
+    out = capsys.readouterr().out
+    assert "coder" in out
+    assert "key" in out.lower()
+
+
+def test_served_capability_passes_preflight(monkeypatch):
+    from yoyo import cli
+
+    monkeypatch.setattr("yoyo.llm.list_models", lambda: ["agent", "coder", "fast"])
+    cli._require_served("supervisor")  # must not raise
+
+
+def test_preflight_does_not_block_when_the_server_is_unreachable(monkeypatch):
+    """Reachability is doctor's job; the preflight must not become a second gate on it."""
+    from yoyo import cli
+
+    def boom():
+        raise RuntimeError("tailnet down")
+
+    monkeypatch.setattr("yoyo.llm.list_models", boom)
+    cli._require_served("supervisor")  # must not raise
+
+
+@pytest.mark.parametrize(
+    "case_id,kind",
+    [
+        ("fidelity-basic", "tool_fidelity"),
+        ("retry-after-error", "tool_retry"),
+        ("grounded-concurrency", "grounded"),
+        ("abstain-unknown", "abstain"),
+    ],
+)
+def test_role_override_reaches_every_case_kind(monkeypatch, case_id, kind):
+    """Observed live: --role reached the tool and abstain runners but NOT the grounded one,
+    so two cases were silently judged against the wrong model and reported PASS. Every
+    runner must honour the override or a model comparison is meaningless."""
+    seen = {}
+
+    class FakeAnswer:
+        text = "an answer [1]"
+        model = "m"
+        latency_ms = 1
+
+        class P:
+            chunk_id = 1
+
+        passages = [P()]
+
+    def fake_ask(prompt, **kw):
+        seen["role"] = kw.get("role")
+        return FakeAnswer()
+
+    def fake_agent_run(prompt, **kw):
+        seen["role"] = kw.get("role")
+
+        class R:
+            text = ""
+            tools_called = []
+            iterations = 1
+            latency_ms = 1
+            stopped_because = "completed"
+
+            def called(self, n):
+                return False
+
+        return R()
+
+    from yoyo import core
+
+    monkeypatch.setattr(core, "ask", fake_ask)
+    monkeypatch.setattr(evals.agent, "run", fake_agent_run)
+
+    evals.run(only=[case_id], role_override="agent_supervisor")
+    assert seen.get("role") == "agent_supervisor", (
+        f"the {kind} runner ignored the role override"
+    )
+
+
+def test_no_runner_bypasses_the_override():
+    """Structural guard: a runner that reads case['role'] directly would reintroduce the
+    bug silently. `_role_for` is the one legitimate reader."""
+    import inspect
+
+    offenders = []
+    for name, fn in vars(evals).items():
+        if not name.startswith("_run_") or not callable(fn):
+            continue
+        if 'case.get("role"' in inspect.getsource(fn):
+            offenders.append(name)
+    assert offenders == [], (
+        f"these runners read the case role directly instead of calling _role_for(): "
+        f"{offenders}"
+    )
+
+
+# ------------------------------------------------- fabricated citations ----
+# Observed live: qwen3-coder-next cited "MyAIServer.md" as
+# file:///Users/robertovivar/Dropbox/ObsidianVault/MyAIServer.md — a username belonging to
+# nobody on this machine. The tool returned a bare filename; the model built a plausible
+# path around it. A fabricated citation is worse than none because it looks checkable.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See [MyAIServer.md](file:///Users/robertovivar/Dropbox/ObsidianVault/MyAIServer.md).",
+        "The note is at /Users/someone/vault/note.md",
+        "Stored in C:\\Users\\bhavi\\Documents\\thing.md",
+        "Found at /home/admin/notes/x.md",
+    ],
+)
+def test_constructed_paths_are_detected(text):
+    assert evals.fabricated_links(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See MyAIServer.md for the hardware details.",
+        "Cited [8] and [16] from the corpus.",
+        "The note Projects/Yoyo.md covers this.",
+        "Message id AAMkAGI2 in your mailbox.",
+    ],
+)
+def test_legitimate_identifiers_are_not_flagged(text):
+    assert evals.fabricated_links(text) == []
+
+
+def test_grounded_case_fails_on_a_fabricated_path(monkeypatch):
+    from yoyo import core
+
+    class Answer:
+        text = "Per [1], see file:///Users/nobody/vault/MyAIServer.md"
+        model = "m"
+        latency_ms = 1
+
+        class P:
+            chunk_id = 1
+
+        passages = [P()]
+
+    monkeypatch.setattr(core, "ask", lambda *a, **k: Answer())
+    r = evals._run_grounded_case(
+        {"id": "x", "kind": "grounded", "prompt": "q", "must_contain": []}
+    )
+    assert not r.passed
+    assert "FABRICATED CITATION PATH" in r.detail
+
+
+def test_unknown_role_prints_one_line_not_a_traceback(monkeypatch, capsys):
+    """Renaming a role should produce a helpful message, not a double stack trace."""
+    import typer
+
+    from yoyo import cli
+
+    monkeypatch.setattr(cli, "console", cli.Console(force_terminal=False))
+    with pytest.raises(typer.Exit) as exc:
+        cli._require_served("a_role_that_was_renamed")
+    assert exc.value.exit_code == 2
+    out = capsys.readouterr().out
+    assert "No role 'a_role_that_was_renamed'" in out
+    assert "Known:" in out and "supervisor" in out

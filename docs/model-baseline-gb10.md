@@ -10,6 +10,57 @@ aarch64.
 
 ---
 
+## 0. Second measurement round — 2026-08-15, qwen3-coder-next
+
+Measured with `yoyo bench` and `yoyo eval` from the laptop over Tailscale. Same instrument
+for both models, distinct prompts, 429s counted separately (none occurred).
+
+| Capability | Model | Active params | Single-stream | Scaling @4 | Gates |
+|---|---|---|---|---|---|
+| `agent` | muse-glimmer 27.9B dense | 27.9B | **11.7 tok/s** | **3.76x** | 7/7 |
+| `coder` | qwen3-coder-next 80B MoE | **3B** | **50.0 tok/s** | **1.09x** | **7/7** |
+
+The 3.76x figure independently reproduces the bring-up bake-off's 3.62x — different
+instrument, different day, same answer.
+
+**Sparsity again predicts speed.** `coder` is nearly three times the total size of `agent`
+and generates 4.3x faster, because only 3B parameters are active per token. It also has no
+thinking mode, so none of that output is spent on reasoning traces — `agent` spent 358
+tokens on a bare "ping".
+
+**Concurrency again refuses to follow architecture.** `coder` is MoE and serialises;
+`agent` is dense and scales. But `qwen3.6:27b` is dense and serialises too (1.01x), so
+"dense scales" is not a rule either — muse-glimmer remains the sole outlier across five
+measured models, and the cause is still unexplained. ADR-022 stands: measure, never infer.
+
+**Gate detail for `coder` (7/7):** fidelity-basic 2 iters · fidelity-under-pressure 2 iters
+· retry-after-error **3 iters (retried and recovered)** · worker-fidelity 2 iters · both
+grounded cases cited valid chunks · abstained appropriately. Case latencies 1.5–8.5 s
+against 30–60 s for `agent`.
+
+### Thinking overhead beats raw throughput
+
+`fast` is nominally the quickest model on the box (76 tok/s vs `coder`'s 50) and is the
+slowest in practice, because thinking is on and its output goes to reasoning traces before
+the answer starts. Measured on identical RAG turns, same corpus, same six retrieved sources:
+
+| Turn | `coder` | `fast` |
+|---|---|---|
+| `yoyo ask "what did the bake-off conclude about concurrency?"` | **9.2 s** | 20.7 s |
+| eval grounded-concurrency | **8.5 s** | 23.0 s |
+| eval grounded-tool-constraint | **6.9 s** | 16.5 s |
+| eval abstain-unknown | **4.8 s** | 12.3 s |
+
+Both answers were correct and well-cited; no quality regression was visible in the prose.
+`answer`, `summarize` and `extract` moved to `coder` on this evidence; `answer_fast` keeps
+`fast` reachable for comparison.
+
+**Revisit when `think: false` lands on `fast`.** Until then, tok/s on a thinking model is
+not a latency prediction — a third case where the obvious number was the wrong one, after
+file size (ADR-022) and total parameters (ADR-027).
+
+---
+
 ## 1. Pinned capabilities
 
 | Capability | Backing model | Architecture | Single-stream gen |

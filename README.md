@@ -8,7 +8,7 @@ describes; if it disagrees with the code, the file is the bug.
 
 - **Last updated:** 2026-08-14 (end of day 2)
 - **Phase:** Phase 0 complete on the critical path. Mail and orchestration in progress.
-- **Tests:** 198 passing
+- **Tests:** 207 passing
 - **Only gate on a real corpus:** OQ4 — the disk is not encrypted
 
 **Primary sources, authoritative over this summary:** `yoyo-client-handoff.md` (the endpoint
@@ -96,10 +96,12 @@ the GB10. Code names a **role**, never a model.
 
 | Role | → | Tools | Reasoning | For |
 |---|---|---|---|---|
-| `supervisor` | `agent` | yes | high | planning, multi-step |
-| `worker` | `agent` | yes | low | tool-using worker turns |
-| `answer` | `fast` | no | — | the default RAG turn |
-| `summarize` / `extract` | `fast` | no | — | closed-context work |
+| `supervisor` | `coder` | yes | — | planning, multi-step |
+| `worker` | `coder` | yes | — | tool-using worker turns |
+| `agent_supervisor` / `agent_worker` | `agent` | yes | high / low | fallback: slower, but thinks and scales |
+| `answer` | `coder` | no | — | the default RAG turn — 9.2 s vs 20.7 s on `fast` |
+| `summarize` / `extract` | `coder` | no | — | closed-context work |
+| `answer_fast` | `fast` | no | — | fallback prose model; revisit after `think: false` |
 
 ---
 
@@ -190,18 +192,15 @@ yoyo mail search "invoice"
 yoyo agent "what did Alice send me about the invoice?"
 ```
 
-### 3. Run the graph live  ✅ built, needs a real run
+### 3. Graph  ✅ done — and it lost the baseline (ADR-026)
 
-Built and unit-tested; never run against the live endpoint.
+Ran twice against the live endpoint. Both times slower than `yoyo agent` on a same-source
+question, the second time 3x slower. Root cause understood and recorded in ADR-026: two
+`agent`-speed researchers reading the same small corpus duplicate each other's work.
 
-```powershell
-uv pip install -e ".[dev,local-embed,mail]"
-yoyo plan "what does my vault say about the GB10 box, and what did the bake-off conclude about concurrency?"
-```
-
-Two things to watch: whether the planner produces sensible *independent* subtasks (dependent
-ones waste the parallelism), and whether wall-clock beats running the same question through
-`yoyo agent`. If it does not, the decomposition is not earning its keep.
+`yoyo agent` is now the documented default. The graph's intended case — a question spanning
+mail AND notes AND corpus — cannot be tested until mail is authenticated, so it is unproven
+rather than disproven.
 
 ### 4. Point the vault at real notes
 
@@ -210,8 +209,6 @@ actual Obsidian vault — **after** step 1.
 
 ### Smaller items, any time
 
-- **Duplicate tool-call guard.** The agent still occasionally reruns a search with reworded
-  terms. Cache results within a turn and short-circuit repeats — mechanical, not more prompting.
 - **`docs/model-baseline-gb10.md`** — verify the numbers against a fresh `ollama list`;
   `gemma4`, `nemotron-3.5-lightning` and `qwen3.6:27b` were slated for removal, unconfirmed.
 - **`think: false`** on `fast`, server-side.
@@ -276,8 +273,9 @@ yoyo backup F:\yoyo-backups   yoyo restore-drill --dest F:\yoyo-backups
 yoyo restore <archive> --force
 ```
 
-Latencies to expect: `fast` short 2–5 s · `fast` with thinking 15–25 s · `agent` single turn
-30–60 s · `agent` tool loop 2–5 min · cold model load +7–11 s.
+Latencies to expect (after the 2026-08-15 model change): `yoyo ask` ~9 s · `yoyo agent`
+~8-15 s · `yoyo plan` 1-3 min · cold model load +7-11 s. The old `agent`/`fast` numbers
+(30-60 s turns, 15-25 s answers) apply only to the `agent_*` and `answer_fast` fallbacks.
 
 ---
 
@@ -335,7 +333,7 @@ Breaking these is a bug, not a style choice.
 ## 10. Tests
 
 ```powershell
-pytest -q          # 198 passing
+pytest -q          # 207 passing
 ruff check src tests
 ```
 
@@ -381,6 +379,8 @@ Docling extraction, the corpus MCP server mounted by a third-party client.
 | ADR-023 | Tool-call fidelity is a hard constraint |
 | ADR-024 | gpt-oss:120b dropped; vLLM deferred, not rejected; SGLang a liability |
 | ADR-025 | Embeddings run locally until the server exposes one |
+| ADR-026 | Multi-agent decomposition lost to the single agent, twice. `yoyo agent` is the default. |
+| ADR-027 | qwen3-coder-next promoted to `supervisor`/`worker`: 7/7 gates, 4.3x faster, but serialises. |
 
 Authoritative log: the Claude project docs `yoyo-architecture-decisions-2026-08-14.md` and
 `yoyo-open-questions-ledger.md`. `docs/adr/` mirrors ADR-021 only.
@@ -410,4 +410,6 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-14 | MCP both directions: client adapter, vault server, corpus server. Live vault turn correct across vault + corpus. Tuned 260 s/8 iters → **148 s/6 iters, completed**. |
 | 2026-08-14 | Mail MCP: Gmail + Microsoft 365, read and draft, no send path. 168 tests. |
 | 2026-08-15 | Git initialised (`bbc89d2`, 56 files). Fixed a regression where a transfer archive re-disabled the vault MCP server. |
+| 2026-08-15 | **ADR-026: graph lost the single-agent baseline twice** (148 s single vs 360 s then 446 s). Fixes improved the answer and worsened latency. Planner now told decomposition is expensive and to prefer one subtask; `yoyo agent` documented as the default. Stopped tuning: two losses is a signal, not noise. |
+| 2026-08-15 | Graph ran live and lost to the single agent (360 s/13 tool calls vs 148 s/5, and a more hedged answer). Root cause: workers saw only their subtask, not the user's question, so one reported a term "does not appear" while its substance sat in its own results. Fixed: workers now receive the original question plus an anti-literalism instruction; duplicate tool calls are short-circuited mechanically. Needs re-measuring. |
 | 2026-08-15 | LangGraph supervisor graph: plan → parallel workers → synthesise, with structured output through `llm.py` rather than PydanticAI. 198 tests. |

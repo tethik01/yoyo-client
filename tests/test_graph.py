@@ -155,7 +155,9 @@ def test_one_failing_worker_does_not_sink_the_run(monkeypatch):
     _plan(monkeypatch, Plan(subtasks=[Subtask(id=1, goal="A"), Subtask(id=2, goal="B")]))
 
     def flaky(prompt, **kw):
-        if "A" in prompt:
+        # Match the goal line specifically: the prompt boilerplate contains stray capital
+        # A's ("A researcher who reports..."), which a bare substring check would hit.
+        if "Your part: A" in prompt:
             raise RuntimeError("tool exploded")
         return FakeAgentResult("B worked")
 
@@ -238,3 +240,43 @@ def test_synthesis_uses_a_no_tools_role(monkeypatch):
     from yoyo.config import get_models
 
     assert get_models().role(seen["role"]).tools is False
+
+
+def test_workers_receive_the_original_question_not_just_their_slice(monkeypatch):
+    """Observed live: an isolated worker reported that a term "does not appear" while the
+    substance was in its own results. Context is what prevents that literalism."""
+    prompts = []
+    _plan(monkeypatch, Plan(subtasks=[Subtask(id=1, goal="find the concurrency result")]))
+
+    def capture(prompt, **kw):
+        prompts.append(prompt)
+        return FakeAgentResult()
+
+    _workers(monkeypatch, capture)
+    _synth(monkeypatch)
+
+    run("what did the bake-off conclude about concurrency?")
+    assert "bake-off conclude about concurrency" in prompts[0], "original question missing"
+    assert "find the concurrency result" in prompts[0], "subtask goal missing"
+    assert "what it MEANS" in prompts[0], "the literalism guard is missing"
+
+
+def test_planner_is_told_decomposition_is_expensive(monkeypatch):
+    """Two measured losses to the single agent: the planner must know the cost, not just
+    the mechanics. Without this it splits every two-clause question."""
+    captured = {}
+
+    def capture(schema, instruction, **kw):
+        captured["instruction"] = instruction
+        return Plan(subtasks=[Subtask(id=1, goal="A")])
+
+    monkeypatch.setattr(sup.structured, "generate", capture)
+    _workers(monkeypatch, lambda *a, **k: FakeAgentResult())
+    _synth(monkeypatch)
+
+    run("what does X say about A and what about B?")
+    text = captured["instruction"]
+    assert "EXPENSIVE" in text
+    assert "three times slower" in text
+    assert "DIFFERENT sources" in text
+    assert "ONE subtask" in text

@@ -34,27 +34,54 @@ log = logging.getLogger(__name__)
 
 PLANNER_INSTRUCTION = """Decide how to answer the user's question.
 
-If you can answer it directly from general knowledge — no lookup in the user's documents,
-notes or mail needed — put the complete answer in `direct_answer` and leave `subtasks` empty.
+Decomposition is EXPENSIVE: each subtask costs a separate researcher taking 2-5 minutes.
+Measured on this system, splitting a question whose parts all read the SAME source is
+roughly three times slower than one researcher doing the whole thing, for no better answer.
+Only split when it genuinely pays.
 
-Otherwise break it into at most {max_subtasks} INDEPENDENT subtasks. Independent means each
-can be researched without the result of another; they run at the same time. Prefer two good
-subtasks over four thin ones. Do not create a subtask for assembling the final answer —
-that happens afterwards.
+Choose one of three:
+
+1. `direct_answer` — you can answer from general knowledge with no lookup in the user's
+   documents, notes or mail. Put the complete answer there, leave `subtasks` empty.
+
+2. ONE subtask — the question needs lookup, but all of it lives in the same place, or the
+   parts are closely related. **This is the common case. Prefer it.**
+
+3. Several subtasks — ONLY when the parts genuinely need DIFFERENT sources (for example one
+   part is in mail and another in notes), or one part is large enough to fill a researcher's
+   budget on its own. Maximum {max_subtasks}.
+
+Two parts of a question are not a reason for two subtasks. "What does X say about A and
+what about B" is ONE subtask if A and B are in the same corpus.
+
+Do not create a subtask for assembling the final answer — that happens afterwards.
 
 Question: {question}"""
 
-WORKER_PROMPT = """{goal}
+WORKER_PROMPT = """You are researching ONE part of a larger question.
+
+The user's full question: {question}
+
+Your part: {goal}
 
 Use the available tools to find this out. Report only what the tools actually returned,
-with source identifiers. If you cannot determine something, say so plainly rather than
-filling the gap."""
+with source identifiers copied EXACTLY as the tools gave them — never construct a file
+path, URL or link around them.
+
+Interpreting your part:
+- The user's wording may not match how the material is labelled. If you cannot find a term
+  literally, search for what it MEANS and report what you find. A researcher who reports
+  "the term does not appear" while the substance is sitting in front of them has failed.
+- Report substance you find that answers the user's question, even if it arrives under a
+  different name than the one you were given.
+- If the material genuinely is not there, say so plainly rather than filling the gap."""
 
 SYNTHESIS_SYSTEM = """You are Yoyo. Combine your researchers' findings into one answer.
 
 - Answer the user's original question directly. Do not describe the research process.
 - Preserve source identifiers from the findings (chunk ids like [12], note paths, message
-  ids) so the answer stays auditable.
+  ids) EXACTLY as they appear, so the answer stays auditable. Never turn a note name into a
+  file path or URL — an invented link looks checkable and is not.
 - Where a subtask failed or found nothing, say so plainly instead of papering over it.
 - Do not add facts that are not in the findings.
 - Be concise."""
@@ -129,11 +156,17 @@ def _direct_node(state: GraphState) -> dict[str, Any]:
 
 
 def _run_worker(
-    subtask: Subtask, budget: GraphBudget, tool_registry: Any
+    subtask: Subtask, question: str, budget: GraphBudget, tool_registry: Any
 ) -> WorkerResult:
+    """Workers get the ORIGINAL question as well as their slice.
+
+    Observed live: a worker told only "find what the bake-off concluded about concurrency"
+    reported that the term "bake-off" appears nowhere, while the concurrency findings were
+    in its own search results. Isolation plus reasoning `low` produces literalism.
+    """
     try:
         result = agent_mod.run(
-            WORKER_PROMPT.format(goal=subtask.goal),
+            WORKER_PROMPT.format(goal=subtask.goal, question=question),
             role="worker",
             max_iterations=budget.worker_iterations,
             wall_clock_s=budget.worker_wall_clock_s,
@@ -172,7 +205,12 @@ def _research_node(
     log.info("dispatching %d subtasks across %d workers", len(subtasks), workers)
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="yoyo-worker") as pool:
-        results = list(pool.map(lambda s: _run_worker(s, budget, tool_registry), subtasks))
+        results = list(
+            pool.map(
+                lambda s: _run_worker(s, state["question"], budget, tool_registry),
+                subtasks,
+            )
+        )
 
     return {"results": sorted(results, key=lambda r: r.subtask_id)}
 

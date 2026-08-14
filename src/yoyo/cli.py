@@ -12,6 +12,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from . import backup as backup_mod
+from . import bench as bench_mod
 from . import agent as agent_mod
 from . import core, doctor
 from .graph import GraphBudget
@@ -27,6 +28,45 @@ from .storage import db, vectors
 
 app = typer.Typer(help="Yoyo — local assistant. Inference runs on MyAIServer.", no_args_is_help=True)
 console = Console()
+
+
+def _require_served(role: str) -> None:
+    """Fail fast when a role's capability is not reachable.
+
+    Observed live: judging a candidate model whose capability the key could not access
+    burned all seven eval cases on identical 403s. One clear message beats seven copies of
+    the same one.
+    """
+    from . import llm
+    from .config import get_models
+
+    # A mistyped or renamed role is a user error, not a crash. Print the known roles.
+    try:
+        endpoint = get_models().role(role).endpoint
+    except KeyError as exc:
+        console.print(f"[red]{exc.args[0]}[/]")
+        raise typer.Exit(2) from None
+    except ValueError as exc:  # tools:true pointed at a non-tool-reliable capability
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(2) from None
+
+    try:
+        served = llm.list_models()
+    except Exception as exc:  # noqa: BLE001 - reachability is doctor's job, not ours
+        console.print(f"[yellow]could not list served models ({exc}); continuing[/]")
+        return
+
+    if endpoint not in served:
+        console.print(
+            f"[red]Role [bold]{role}[/bold] maps to capability [bold]{endpoint}[/bold], "
+            f"which this key cannot reach.[/]\n"
+            f"[dim]Served: {', '.join(served)}[/]\n\n"
+            f"Either the model is not registered in LiteLLM, or this laptop's virtual key "
+            f"is not permitted to use it. LiteLLM filters /v1/models by key permission, so "
+            f"an unlisted model usually means the key, not the config.\n"
+            f"Fix: add {endpoint!r} to the key's allowed models, then re-run `yoyo doctor`."
+        )
+        raise typer.Exit(2)
 
 
 def _setup_logging() -> None:
@@ -212,6 +252,14 @@ def agent(
                 console.print(f"[yellow]mcp {name}: {escape(r['error'])}[/]")
     result = agent_mod.run(question, role=role, max_iterations=max_iterations)
     console.print(escape(result.text))
+    if result.fabricated_links:
+        # Shown, not hidden. The scrubber makes the answer safe to read; it does not make
+        # the model trustworthy, and the owner should know which turns needed it.
+        console.print(
+            f"\n[yellow]warning: removed {len(result.fabricated_links)} fabricated citation "
+            f"path(s) from this answer — the model invented "
+            f"{escape(', '.join(result.fabricated_links))}[/]"
+        )
     console.print(
         f"\n[dim]{result.model} · {result.latency_ms} ms · {result.iterations} iterations "
         f"· {result.stopped_because}[/]"
@@ -226,6 +274,9 @@ def agent(
 @app.command()
 def eval(
     only: Optional[str] = typer.Option(None, help="Case id or kind to run"),  # noqa: UP045
+    role: Optional[str] = typer.Option(  # noqa: UP045
+        None, help="Override the role for every case — use to judge a candidate model"
+    ),
 ) -> None:
     """Run the golden evaluation set. These are gates, not a score."""
     _setup_logging()
@@ -244,8 +295,18 @@ def eval(
         if not r.passed:
             console.print(f"      [red]{escape(r.detail)}[/]")
 
+    if role:
+        from .config import get_models
+
+        _require_served(role)
+        endpoint = get_models().role(role).endpoint
+        console.print(f"[bold]Judging role [cyan]{role}[/] -> capability [cyan]{endpoint}[/][/]\n")
+
     report = evals_mod.run(
-        only=[only] if only else None, on_start=started, on_result=finished
+        only=[only] if only else None,
+        on_start=started,
+        on_result=finished,
+        role_override=role,
     )
 
     console.print()
@@ -357,6 +418,52 @@ def mcp_serve_corpus() -> None:
     from .mcp.corpus_server import main
 
     main()
+
+
+@app.command()
+def bench(
+    role: str = typer.Option("supervisor", help="Role whose capability to measure"),
+    concurrency: str = typer.Option("1,4", help="Comma-separated levels, e.g. 1,2,4"),
+    max_tokens: int = typer.Option(300),
+    repeats: int = typer.Option(1, help="Rounds per level; prompts rotate between rounds"),
+) -> None:
+    """Measure single-stream speed and concurrency scaling for one capability.
+
+    Concurrency is empirical (ADR-022) — two architectural hypotheses were tested and both
+    falsified. Never infer scaling from a model being MoE or from a sibling model.
+    """
+    _setup_logging()
+    _require_served(role)
+    levels = tuple(int(x) for x in concurrency.split(",") if x.strip())
+    result = bench_mod.run(role, levels, max_tokens=max_tokens, repeats=repeats)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("concurrency", justify="right")
+    table.add_column("aggregate tok/s", justify="right")
+    table.add_column("per-stream tok/s", justify="right")
+    table.add_column("scaling", justify="right")
+    table.add_column("wall clock", justify="right")
+    table.add_column("429s", justify="right")
+    for lv in result.levels:
+        table.add_row(
+            str(lv.concurrency),
+            f"{lv.aggregate_tok_s:.1f}",
+            f"{lv.per_stream_tok_s:.1f}",
+            f"{result.scaling(lv):.2f}x" if lv.concurrency > 1 else "-",
+            f"{lv.wall_clock_s:.1f}s",
+            str(lv.rate_limited) if lv.rate_limited else "-",
+        )
+    console.print(f"[bold]{result.role}[/] -> capability [cyan]{result.endpoint}[/]")
+    console.print(table)
+    if result.usable:
+        console.print(result.verdict())
+    else:
+        console.print(f"[red]{result.verdict()}[/]")
+    if any(lv.rate_limited for lv in result.levels):
+        console.print(
+            "[yellow]Some requests were rate limited. Per-key max_parallel_requests caps "
+            "this laptop at ~2 — that is a policy limit, not the model serialising.[/]"
+        )
 
 
 mail_app = typer.Typer(help="Mail accounts: Gmail and Microsoft 365. Read and draft only.")
