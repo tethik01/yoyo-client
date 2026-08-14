@@ -14,6 +14,8 @@ from rich.table import Table
 from . import backup as backup_mod
 from . import agent as agent_mod
 from . import core, doctor
+from .graph import GraphBudget
+from .graph import run as graph_run
 from . import evals as evals_mod
 from . import mail as mail_mod
 from . import tools as tools_mod
@@ -261,6 +263,47 @@ def eval(
     if not report.ok:
         console.print("[red]Gates failed. Do not pin a model to the affected role.[/]")
     raise typer.Exit(0 if report.ok else 1)
+
+
+@app.command()
+def plan(
+    question: str,
+    max_subtasks: int = typer.Option(4, help="Ceiling on decomposition"),
+    max_parallel: int = typer.Option(3, help="Concurrent workers (server has 4 slots, shared)"),
+    mcp: bool = typer.Option(True, help="Mount MCP servers from yoyo-mcp.yaml"),
+) -> None:
+    """Multi-step research: plan, delegate to parallel workers, synthesise."""
+    _setup_logging()
+    if mcp:
+        for name, r in mcp_client.mount_all().items():
+            if not r["ok"]:
+                console.print(f"[yellow]mcp {name}: {escape(r['error'])}[/]")
+
+    budget = GraphBudget(max_subtasks=max_subtasks, max_parallel=max_parallel)
+    result = graph_run(question, budget=budget)
+
+    if result.plan and result.plan.subtasks:
+        console.print("[bold]Plan[/]")
+        if result.plan.reasoning:
+            console.print(f"  [dim]{escape(result.plan.reasoning)}[/]")
+        for st in result.plan.subtasks:
+            console.print(f"  {st.id}. {escape(st.goal)}")
+        console.print()
+
+    console.print(escape(result.answer))
+    console.print(
+        f"\n[dim]{result.latency_ms / 1000:.1f}s · {result.subtask_count} subtasks "
+        f"· {result.stopped_because}[/]"
+    )
+    for r in result.results:
+        mark = "[green]ok[/]" if r.ok else "[red]fail[/]"
+        tools = ", ".join(r.tools_used) or "no tools"
+        console.print(
+            f"[dim]  {mark} {r.subtask_id}. {escape(r.goal[:60])} "
+            f"({r.latency_ms / 1000:.0f}s, {escape(tools)})[/]"
+        )
+    for n in result.notes:
+        console.print(f"[yellow]  note: {escape(n)}[/]")
 
 
 mcp_app = typer.Typer(help="MCP servers: mount external ones, or serve Yoyo's own.")

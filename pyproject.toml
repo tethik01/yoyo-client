@@ -19,6 +19,7 @@ dependencies = [
     "python-dotenv>=1.0",
     # 1.x exposes FastMCP, 2.x exposes MCPServer — mcp/_compat.py handles both.
     "mcp>=1.2",
+    "langgraph>=0.2",
 ]
 
 [project.optional-dependencies]

@@ -8,7 +8,7 @@ describes; if it disagrees with the code, the file is the bug.
 
 - **Last updated:** 2026-08-14 (end of day 2)
 - **Phase:** Phase 0 complete on the critical path. Mail and orchestration in progress.
-- **Tests:** 168 passing
+- **Tests:** 198 passing
 - **Only gate on a real corpus:** OQ4 — the disk is not encrypted
 
 **Primary sources, authoritative over this summary:** `yoyo-client-handoff.md` (the endpoint
@@ -190,12 +190,18 @@ yoyo mail search "invoice"
 yoyo agent "what did Alice send me about the invoice?"
 ```
 
-### 3. LangGraph + PydanticAI orchestration
+### 3. Run the graph live  ✅ built, needs a real run
 
-The handoff names both. The tool layer beneath is now verified, which makes this a much safer
-build than it would have been yesterday. Scope for a first pass: a supervisor graph that
-plans, delegates to `worker` turns, and returns a structured result — with the same budget
-governance the agent loop already has.
+Built and unit-tested; never run against the live endpoint.
+
+```powershell
+uv pip install -e ".[dev,local-embed,mail]"
+yoyo plan "what does my vault say about the GB10 box, and what did the bake-off conclude about concurrency?"
+```
+
+Two things to watch: whether the planner produces sensible *independent* subtasks (dependent
+ones waste the parallelism), and whether wall-clock beats running the same question through
+`yoyo agent`. If it does not, the decomposition is not earning its keep.
 
 ### 4. Point the vault at real notes
 
@@ -254,6 +260,7 @@ yoyo reindex --recreate       yoyo migrate
 yoyo ask "q"                  # RAG turn on `fast`, ~15-30 s
 yoyo ask "q" --role supervisor
 yoyo agent "q"                # tool-calling turn on `agent`, 60-150 s
+yoyo plan "q"                 # multi-step: plan, parallel workers, synthesise
 yoyo serve                    # HTTP API on 127.0.0.1:8080
 
 # tools, MCP, evals
@@ -328,12 +335,14 @@ Breaking these is a bug, not a style choice.
 ## 10. Tests
 
 ```powershell
-pytest -q          # 168 passing
+pytest -q          # 198 passing
 ruff check src tests
 ```
 
 | Area | Tests | Covers |
 |---|---|---|
+| Graph | 22 | routing, plan capping reported not silent, budgets passed through, parallelism bounded *and* actually parallel, worker/planner/synthesis failure paths |
+| Structured output | 19 | fenced/prose-wrapped/nested/escaped JSON, retry feeds the error back, gives up cleanly |
 | Mail | 30 | config, account resolution, Gmail/Graph parsing, HTML→text, MIME round trip, **structural proof no send path exists** |
 | Vault | 22 | path confinement both directions, symlink escape, frontmatter, backlinks, drafts-only writes, drafts excluded from canon |
 | Eval harness | 20 | fidelity gate catches a fabricating model, retry gate fails give-up-after-one-error, abstention both directions |
@@ -400,3 +409,5 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-14 | Tool registry, bounded agent loop, golden eval set — **7/7 live**, all four hard gates. |
 | 2026-08-14 | MCP both directions: client adapter, vault server, corpus server. Live vault turn correct across vault + corpus. Tuned 260 s/8 iters → **148 s/6 iters, completed**. |
 | 2026-08-14 | Mail MCP: Gmail + Microsoft 365, read and draft, no send path. 168 tests. |
+| 2026-08-15 | Git initialised (`bbc89d2`, 56 files). Fixed a regression where a transfer archive re-disabled the vault MCP server. |
+| 2026-08-15 | LangGraph supervisor graph: plan → parallel workers → synthesise, with structured output through `llm.py` rather than PydanticAI. 198 tests. |
