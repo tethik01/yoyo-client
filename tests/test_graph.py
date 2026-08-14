@@ -261,9 +261,12 @@ def test_workers_receive_the_original_question_not_just_their_slice(monkeypatch)
     assert "what it MEANS" in prompts[0], "the literalism guard is missing"
 
 
-def test_planner_is_told_decomposition_is_expensive(monkeypatch):
-    """Two measured losses to the single agent: the planner must know the cost, not just
-    the mechanics. Without this it splits every two-clause question."""
+def test_planner_split_criterion_is_source_based_not_cost_based(monkeypatch):
+    """ADR-026 round 4. The instruction used to warn that decomposition was "roughly three
+    times slower" — measured on `agent`, and FALSE on `coder`, where splitting this exact
+    question was faster (24 s vs 30 s) as well as more reliable. A stale cost warning biases
+    the planner against the thing it should do, so the criterion is now purely about whether
+    the parts need different sources."""
     captured = {}
 
     def capture(schema, instruction, **kw):
@@ -276,7 +279,9 @@ def test_planner_is_told_decomposition_is_expensive(monkeypatch):
 
     run("what does X say about A and what about B?")
     text = captured["instruction"]
-    assert "EXPENSIVE" in text
-    assert "three times slower" in text
+    assert "three times slower" not in text, "stale pre-coder latency claim is back"
     assert "DIFFERENT sources" in text
     assert "ONE subtask" in text
+    # When the source split is unclear, splitting is the safe error — a lone researcher
+    # reporting "not found" from one source was observed live and is the worse failure.
+    assert "SPLIT" in text

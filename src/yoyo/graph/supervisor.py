@@ -34,25 +34,29 @@ log = logging.getLogger(__name__)
 
 PLANNER_INSTRUCTION = """Decide how to answer the user's question.
 
-Decomposition is EXPENSIVE: each subtask costs a separate researcher taking 2-5 minutes.
-Measured on this system, splitting a question whose parts all read the SAME source is
-roughly three times slower than one researcher doing the whole thing, for no better answer.
-Only split when it genuinely pays.
+Each subtask costs a separate researcher, so do not split a question that one researcher can
+answer in one pass. But splitting is not expensive here: researchers run in parallel, and a
+question whose parts need different sources is answered FASTER and more reliably split than
+whole. Measured on this system, one researcher covering two sources took 30 s; two
+researchers covering one each took 24 s and got the same answer.
+
+Split when the parts need different sources. Do not split for the sake of it.
 
 Choose one of three:
 
 1. `direct_answer` — you can answer from general knowledge with no lookup in the user's
    documents, notes or mail. Put the complete answer there, leave `subtasks` empty.
 
-2. ONE subtask — the question needs lookup, but all of it lives in the same place, or the
-   parts are closely related. **This is the common case. Prefer it.**
+2. ONE subtask — the question needs lookup, and all of it lives in ONE place: the corpus, or
+   the notes, or mail. Not "is closely related" — literally one source.
 
-3. Several subtasks — ONLY when the parts genuinely need DIFFERENT sources (for example one
-   part is in mail and another in notes), or one part is large enough to fill a researcher's
-   budget on its own. Maximum {max_subtasks}.
+3. Several subtasks — the parts need DIFFERENT sources (notes AND corpus, or mail AND notes),
+   or one part is large enough to fill a researcher's budget on its own. Maximum
+   {max_subtasks}.
 
-Two parts of a question are not a reason for two subtasks. "What does X say about A and
-what about B" is ONE subtask if A and B are in the same corpus.
+When unsure whether the parts share a source, SPLIT. A researcher that searches one source,
+finds nothing, and reports "not found" produces a confidently wrong answer — that failure has
+been observed live and it is worse than the seconds a second researcher costs.
 
 Do not create a subtask for assembling the final answer — that happens afterwards.
 
