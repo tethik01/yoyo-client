@@ -6,9 +6,10 @@ corpus leaving your network.
 This file is the **living status document**. Update it in the same commit as the change it
 describes; if it disagrees with the code, the file is the bug.
 
-- **Last updated:** 2026-08-14 (end of day 2)
-- **Phase:** Phase 0 complete on the critical path. Mail and orchestration in progress.
-- **Tests:** 207 passing
+- **Last updated:** 2026-08-15 (end of day 3)
+- **Phase:** Phase 0 complete on the critical path. Orchestration measured and settled.
+  Mail built but awaiting OAuth setup.
+- **Tests:** 256 passing
 - **Only gate on a real corpus:** OQ4 — the disk is not encrypted
 
 **Primary sources, authoritative over this summary:** `yoyo-client-handoff.md` (the endpoint
@@ -96,12 +97,10 @@ the GB10. Code names a **role**, never a model.
 
 | Role | → | Tools | Reasoning | For |
 |---|---|---|---|---|
-| `supervisor` | `coder` | yes | — | planning, multi-step |
-| `worker` | `coder` | yes | — | tool-using worker turns |
-| `agent_supervisor` / `agent_worker` | `agent` | yes | high / low | fallback: slower, but thinks and scales |
-| `answer` | `coder` | no | — | the default RAG turn — 9.2 s vs 20.7 s on `fast` |
-| `summarize` / `extract` | `coder` | no | — | closed-context work |
-| `answer_fast` | `fast` | no | — | fallback prose model; revisit after `think: false` |
+| `supervisor` | `agent` | yes | high | planning, multi-step |
+| `worker` | `agent` | yes | low | tool-using worker turns |
+| `answer` | `fast` | no | — | the default RAG turn |
+| `summarize` / `extract` | `fast` | no | — | closed-context work |
 
 ---
 
@@ -116,8 +115,9 @@ the GB10. Code names a **role**, never a model.
 |---|---|---|
 | Ollama + LiteLLM + Postgres, systemd | ✅ | survives reboot |
 | HTTPS over Tailscale | ✅ | verified from the laptop |
-| `agent` and `fast` served | ✅ | |
+| `agent`, `fast` and `coder` served | ✅ | `coder` added 2026-08-15 (ADR-027) |
 | Bake-off, four models | ✅ | `docs/model-baseline-gb10.md` |
+| qwen3-coder-next evaluated and promoted | ✅ | 7/7 gates, 50 tok/s — ADR-027 |
 | `think: false` on `fast` | ⬜ | assume thinking is on |
 | Embedding model (`bge-m3`) | ⬜ | not deployed — Yoyo embeds locally |
 | Reranker | ⬜ | not deployed |
@@ -138,17 +138,22 @@ the GB10. Code names a **role**, never a model.
 | Hybrid retrieval + RRF | ✅ | `rag/retrieve.py` |
 | Turn loop with citations | ✅ | `core.py` |
 | HTTP API + streaming | 🟡 | `api.py` — `/ask` used, `/ask/stream` untested |
-| CLI (20 commands) | ✅ | `cli.py` |
+| CLI (24 commands) | ✅ | `cli.py` — documented in §6 |
 | Backup / restore drill | ✅ | `backup.py` — 11/11 on the real drive |
 | Tool registry, 4 built-ins | ✅ | `tools.py` |
 | Bounded agent loop | ✅ | `agent.py` — iteration + wall-clock budgets |
-| Golden eval set, 7 gates | ✅ | `evals/golden.yaml` — 7/7 live |
+| Golden eval set, 7 gates | ✅ | `evals/golden.yaml` — 7/7 live on `coder` |
+| Concurrency bench | ✅ | `bench.py` — distinct prompts, 429s counted separately |
+| Fabricated-citation scrubber | ✅ | `citations.py` — strips invented paths, CLI warns |
+| Untried-source hint in the agent loop | ✅ | `agent.py` — fixes source tunnelling |
 | MCP client adapter | ✅ | `mcp/client.py` |
 | Vault MCP server | ✅ | `mcp/vault_server.py` — drafts-only write |
 | Corpus MCP server | 🟡 | `mcp/corpus_server.py` — never mounted by another client |
 | Mail MCP server (Gmail + M365) | 🟡 | `mail/`, `mcp/mail_server.py` — **needs OAuth setup** |
 | Obsidian vault as canon | 🟡 | pointed at `test-vault`, not a real vault |
-| LangGraph + PydanticAI orchestration | ⬜ | next |
+| LangGraph supervisor graph | ✅ | `graph/supervisor.py` — plan → parallel workers → synthesise |
+| Orchestration baseline measured | ✅ | ADR-026, four rounds — `plan` wins multi-part |
+| PydanticAI | ❌ | rejected — structured output via `llm.py` instead |
 | Langfuse observability | ⬜ | |
 | Calendar MCP | ⬜ | |
 | Voice (STT/TTS) | ⬜ | box-side plan void |
@@ -158,7 +163,7 @@ the GB10. Code names a **role**, never a model.
 
 ---
 
-## 4. Tomorrow
+## 4. Next
 
 In the order I'd take them.
 
@@ -172,7 +177,9 @@ the unencrypted-disk problem worse, and this is the cheapest item on the list.
 
 ### 2. Finish mail setup — your accounts, your consent
 
-Neither can be done for you: both need account-level app registration and OAuth consent.
+**The largest gap between what is built and what is usable.** The code is done and tested;
+neither step below can be done for you, because both need account-level app registration and
+OAuth consent in your own browser.
 
 **Gmail** — Cloud Console → enable Gmail API → Credentials → OAuth client ID → *Desktop app*
 → save JSON to `secrets\gmail-personal.json` → add yourself as a test user.
@@ -192,15 +199,12 @@ yoyo mail search "invoice"
 yoyo agent "what did Alice send me about the invoice?"
 ```
 
-### 3. Graph  ✅ done — and it lost the baseline (ADR-026)
+### 3. Re-test the graph in its intended case
 
-Ran twice against the live endpoint. Both times slower than `yoyo agent` on a same-source
-question, the second time 3x slower. Root cause understood and recorded in ADR-026: two
-`agent`-speed researchers reading the same small corpus duplicate each other's work.
-
-`yoyo agent` is now the documented default. The graph's intended case — a question spanning
-mail AND notes AND corpus — cannot be tested until mail is authenticated, so it is unproven
-rather than disproven.
+ADR-026 is settled for **two local sources**. The graph has still never been measured on the
+case it was built for: mail **and** vault **and** corpus in one question. That test needs
+step 2 done first, and it is the one that decides whether decomposition earns its keep
+generally or only on this question shape.
 
 ### 4. Point the vault at real notes
 
@@ -211,11 +215,20 @@ actual Obsidian vault — **after** step 1.
 
 - **`docs/model-baseline-gb10.md`** — verify the numbers against a fresh `ollama list`;
   `gemma4`, `nemotron-3.5-lightning` and `qwen3.6:27b` were slated for removal, unconfirmed.
-- **`think: false`** on `fast`, server-side.
+  The file also predates `coder`.
+- **`think: false`** on `fast`, server-side — build `qwen3.6-nothink`, register it as a
+  separate capability, and compare. `fast` currently pays thinking overhead on every turn.
 - **Answer OQ7** (local vs server embeddings) while the corpus is still small — either way
   costs a full reindex.
+- **Re-run the ADR-026 comparison a few more times.** Every round so far is a single trial
+  per config. The gaps were large enough to act on and too small a sample to call closed.
+- **Round 4 spent 3 tool calls after both parts were answerable** — possibly the new
+  untried-source hint over-encouraging exploration. Only worth chasing if agent latency
+  starts to matter.
 - **Calendar MCP**, same adapter shape as mail.
 - **Test `/ask/stream`** — written, never exercised.
+- **Raise `OLLAMA_MAX_LOADED_MODELS` to 3** so `agent`, `fast` and `coder` can be resident
+  together; currently a role switch can cost a cold load.
 
 ---
 
@@ -246,36 +259,133 @@ yoyo doctor                   # the gate — nothing below is trustworthy until 
 
 ---
 
-## 6. Commands
+## 6. Command reference
 
-```powershell
-# corpus
-yoyo ingest <path>            yoyo search "q"          yoyo stats
-yoyo reindex --recreate       yoyo migrate
+Every command. Run `yoyo --help` or `yoyo <command> --help` for the machine-generated
+version; this section explains **what each one is for and when you would reach for it**,
+which `--help` cannot.
 
-# asking
-yoyo ask "q"                  # RAG turn on `fast`, ~15-30 s
-yoyo ask "q" --role supervisor
-yoyo agent "q"                # tool-calling turn on `agent`, 60-150 s
-yoyo plan "q"                 # multi-step: plan, parallel workers, synthesise
-yoyo serve                    # HTTP API on 127.0.0.1:8080
+All commands are run from `C:\Projects\Yoyo\YoyoClient` with the venv active. Exit code 0
+means pass; `doctor` and `restore-drill` return 1 on failure so they can gate a script.
 
-# tools, MCP, evals
-yoyo tools                    yoyo eval                yoyo eval --only <case>
-yoyo mcp list                 yoyo mcp serve-vault     yoyo mcp serve-corpus
-yoyo mcp serve-mail
+### 6.1 Health and setup
 
-# mail
-yoyo mail accounts            yoyo mail auth <name>    yoyo mail search "q"
+| Command | What it does |
+|---|---|
+| `yoyo doctor` | Checks every seam in one pass: tailnet reachability, API key auth, that the roles in `yoyo-models.yaml` name capabilities the server actually serves, local embeddings load, SQLite migrations applied, Qdrant reachable, collection dimensions match the embed model. **Run this first whenever anything behaves oddly** — it turns "it's broken" into a named seam. Exits 1 if any check fails. |
+| `yoyo migrate` | Applies pending SQLite migrations. Idempotent — prints `nothing (up to date)` when there is nothing to do. Runs implicitly on first use, so you rarely call it directly. |
+| `yoyo stats` | Counts: documents, chunks, embedded chunks, conversations, messages, plus the Qdrant collection info. The fastest way to answer "did that ingest actually land?" — `chunks` and `embedded chunks` should be equal. |
 
-# backup
-yoyo backup F:\yoyo-backups   yoyo restore-drill --dest F:\yoyo-backups
-yoyo restore <archive> --force
-```
+### 6.2 Corpus
 
-Latencies to expect (after the 2026-08-15 model change): `yoyo ask` ~9 s · `yoyo agent`
-~8-15 s · `yoyo plan` 1-3 min · cold model load +7-11 s. The old `agent`/`fast` numbers
-(30-60 s turns, 15-25 s answers) apply only to the `agent_*` and `answer_fast` fallbacks.
+| Command | What it does |
+|---|---|
+| `yoyo ingest <path>` | Reads a file or folder into the corpus: extracts text, chunks it (1200 chars / 150 overlap), stores in SQLite, embeds into Qdrant. `--no-recursive` to stay in one folder. **Idempotent by content hash** — re-running on unchanged files skips them, so you can point it at the same folder daily. Reports new/changed/unchanged and lists failures rather than dying on one bad file. |
+| `yoyo search "q"` | Hybrid retrieval **without calling a model**. Shows the passages, their chunk ids and fusion scores. Use this to separate "retrieval didn't find it" from "the model ignored it" — the single most useful debugging move when an answer is wrong. `--top-k N` (default 6). |
+| `yoyo reindex` | Re-embeds chunks that have no vector. Cheap; safe to run any time. |
+| `yoyo reindex --recreate` | Drops the Qdrant collection and re-embeds **everything**. Required after changing the embed model or its dimensions in `yoyo-models.yaml` — vectors from different models are not comparable, and mixing them silently degrades retrieval rather than erroring. |
+
+### 6.3 Asking — three escalating modes
+
+These are the three ways to get an answer, cheapest first. Picking the right one matters more
+than tuning any of them.
+
+| Command | What it does |
+|---|---|
+| `yoyo ask "q"` | **One retrieval, one model turn.** Retrieves passages, hands them to the model, prints the answer with numbered citations and the sources beneath. No tools, no loop. The default for "what do my documents say about X". `--role <name>` to use a different role, `--no-rag` to ask the model cold with no retrieval, `--conversation <id>` to continue a thread. |
+| `yoyo agent "q"` | **Tool-calling loop.** The model chooses tools (corpus search, vault, mail, clock) and iterates until it can answer. Bounded: 8 iterations and 600 s by default, `--max-iterations N` to change. Mounts MCP servers from `yoyo-mcp.yaml` unless `--no-mcp`. Prints every tool call with ok/err so you can see the reasoning path. Use when the answer needs a live lookup, or several. |
+| `yoyo plan "q"` | **Multi-agent research.** A planner decomposes the question, workers run **in parallel** with their own tool budgets, a synthesiser assembles the answer. `--max-subtasks N` (default 4), `--max-parallel N` (default 3). Prints the plan and its reasoning before the answer. Use for questions spanning different sources. |
+
+**Which one?** (ADR-026, four measured rounds)
+
+- Single source, single part → `ask`, or `agent` if it needs a lookup.
+- **Multi-part or multi-source → `plan`.** It is now both more reliable *and* faster than
+  `agent` on these: measured 23.6 s against 30.1 s, and in an earlier round `agent` answered
+  a two-part question **wrongly** by searching only the vault and reporting "not found" for
+  the half that was in the corpus.
+- Do not reach for `plan` to speed up a simple question — it is ~3x slower there.
+
+| Command | What it does |
+|---|---|
+| `yoyo serve` | Runs the local HTTP API on `127.0.0.1:8080` — `/ask` and `/ask/stream`. Loopback only, no auth, not exposed to the tailnet. This is the seam a future phone client would talk to. |
+
+### 6.4 Tools and MCP
+
+Yoyo speaks MCP **in both directions**: it mounts other people's servers as a client, and it
+exposes its own capabilities as servers other clients can mount.
+
+| Command | What it does |
+|---|---|
+| `yoyo tools` | Lists every registered tool with its description — exactly the text the model sees. If the model is misusing a tool, read its description here first; the description is the prompt. |
+| `yoyo mcp list` | Mounts everything in `yoyo-mcp.yaml` and shows what each server provides, or why it failed. The go-to when a tool you expected is missing from `yoyo tools`. |
+| `yoyo mcp serve-vault` | Runs Yoyo's Obsidian vault server over stdio. Read + search + backlinks, and `vault_write_draft` which **flattens any path into `yoyo-drafts/`** — the assistant cannot overwrite your notes. |
+| `yoyo mcp serve-corpus` | Runs the ingested-corpus server over stdio. Read-only. |
+| `yoyo mcp serve-mail` | Runs the mail server over stdio. Read and draft only — **no send path exists in the code**, and a test asserts that structurally. |
+
+The `serve-*` commands are not meant to be run by hand — they are what another MCP client
+(Claude Desktop, or Yoyo itself) launches as a subprocess. Running one in a terminal just
+leaves it waiting on stdin.
+
+### 6.5 Evaluation and measurement
+
+The two commands that decide whether a model is allowed to do a job. Neither produces a score
+you optimise; both produce a verdict you act on.
+
+| Command | What it does |
+|---|---|
+| `yoyo eval` | Runs the golden set — 7 cases, 4 hard gates: **tool fidelity** (a probe tool holds an unguessable secret; the model must call it and report the value, fabricating instead is a hard fail), **tool retry** (the probe fails once — giving up after one error fails), **grounded** (the answer must cite a real chunk id and must contain no fabricated file path), **abstain** (the corpus cannot answer it; inventing an answer fails). `--only <case-or-kind>` to run one. Budget ~5 min for the full set. |
+| `yoyo eval --role <role>` | Same gates against a different role — **this is how a candidate model gets promoted**. A model that has not passed all four gates does not get pinned to a tool-using role, regardless of how fast it is. |
+| `yoyo bench --role <role>` | Measures single-stream speed and concurrency scaling for the capability behind a role. `--concurrency 1,4` sets the levels, `--repeats N` averages rounds. Reports aggregate tok/s, per-stream tok/s, scaling factor, and 429s **counted separately** so a per-key rate limit is never mistaken for the model serialising. Prints `NO MEASUREMENT` rather than a number when every request failed. |
+
+**Why bench exists:** concurrency is **empirical** (ADR-022). Two architectural hypotheses
+were tested and both falsified — being MoE predicts nothing, and a sibling model's scaling
+predicts nothing. `agent` scales 3.76x at concurrency 4; `fast` and `coder` both serialise
+(~1.1x) despite all three being MoE. Measure every new model.
+
+### 6.6 Mail
+
+Read and draft only, by design. Consent is per-account and the OAuth flow runs in your
+browser — Yoyo never sees your password.
+
+| Command | What it does |
+|---|---|
+| `yoyo mail accounts` | Every configured account, its provider, whether it is enabled, and whether it is authenticated. Shows where tokens live. Start here. |
+| `yoyo mail auth <name>` | Runs the OAuth consent flow for one account. Warns first that this stores a long-lived refresh token for the whole mailbox on an unencrypted disk (OQ4). |
+| `yoyo mail search "q"` | Searches mail **without involving a model** — the mail equivalent of `yoyo search`. Use it to confirm auth and scopes work before debugging an agent turn. `--account <name>`, `--limit N`. |
+
+Scopes are deliberately minimal: Gmail `gmail.readonly` + `gmail.compose`; Microsoft Graph
+`Mail.Read` + `Mail.ReadWrite`. **Never `Mail.Send`.** Drafts land in your mailbox for you to
+review and send yourself — that asymmetry is the human-in-the-loop mechanism, not a
+limitation to be removed later.
+
+### 6.7 Backup and restore
+
+| Command | What it does |
+|---|---|
+| `yoyo backup <folder>` | Snapshots SQLite + config into a timestamped zip. **Vectors are not included** — they are derived data, rebuilt by `reindex --recreate`, and including them would triple the archive for no recovery value. |
+| `yoyo restore-drill <archive>` | **Proves a backup can be restored**, reading only, never touching live data. Opens the archive into a temp location, checks the schema, counts rows, verifies integrity. `--dest <folder>` uses the newest archive in that folder. Exits 1 on any failure. |
+| `yoyo restore <archive> --force` | Replaces the live database from an archive. Destructive — `--force` is required. Vectors are *not* restored; run `yoyo reindex --recreate` afterwards, as the command reminds you. |
+
+**An unverified backup is a guess.** `yoyo backup` prints the drill command for this reason.
+Current status: 11/11 checks passing against the real USB drive (`F:\yoyo-backups`).
+
+### 6.8 Latencies to expect
+
+Measured on this hardware, current model assignments.
+
+| Operation | Time |
+|---|---|
+| `yoyo search` (no model) | < 1 s |
+| `yoyo ask` on `coder` | 8–10 s |
+| `yoyo ask` on `fast` (thinking on) | 20–25 s |
+| `yoyo agent`, single-source question | ~8 s |
+| `yoyo agent`, multi-part question | ~30 s |
+| `yoyo plan`, multi-part question | ~24 s |
+| `yoyo eval`, full set | ~5 min |
+| Cold model load | +7–11 s |
+
+A first run after boot pays the model load; a `NO MEASUREMENT` from `bench` or a timeout on
+the first `ask` of the day is usually the box swapping a model in, not a fault.
 
 ---
 
@@ -333,19 +443,20 @@ Breaking these is a bug, not a style choice.
 ## 10. Tests
 
 ```powershell
-pytest -q          # 207 passing
+pytest -q          # 256 passing
 ruff check src tests
 ```
 
 | Area | Tests | Covers |
 |---|---|---|
-| Graph | 22 | routing, plan capping reported not silent, budgets passed through, parallelism bounded *and* actually parallel, worker/planner/synthesis failure paths |
-| Structured output | 19 | fenced/prose-wrapped/nested/escaped JSON, retry feeds the error back, gives up cleanly |
 | Mail | 30 | config, account resolution, Gmail/Graph parsing, HTML→text, MIME round trip, **structural proof no send path exists** |
 | Vault | 22 | path confinement both directions, symlink escape, frontmatter, backlinks, drafts-only writes, drafts excluded from canon |
 | Eval harness | 20 | fidelity gate catches a fabricating model, retry gate fails give-up-after-one-error, abstention both directions |
 | MCP client | 20 | config, schema translation, result unwrapping, SDK field-name drift, failure diagnostics, **live stdio round trip** |
-| Agent / tools | 19 | arg validation, errors surfaced not raised, iteration + wall-clock budgets, forced answer on exhaustion |
+| Agent / tools | 34 | arg validation, errors surfaced not raised, iteration + wall-clock budgets, forced answer on exhaustion, duplicate short-circuit, **untried-source hint**, **fabricated-path stripping** |
+| Graph | 24 | plan/dispatch/synthesise, subtask cap never silently truncates, worker gets the full question, **planner splits on source difference not cost** |
+| Citations | 7 | scrubber keeps real identifiers, replaces invented paths visibly, gate and scrubber share one regex |
+| Bench | 9 | distinct prompts, `NO MEASUREMENT` when every request fails, 429s not read as serialisation |
 | Backup | 14 | archive contents, `.env` exclusion, drill fails on corruption and count mismatch |
 | Storage | 8 | migrations, hash skip, chunk rebuild, FTS, ordering |
 | Chunking | 8 | boundaries, coverage, ordinals, size bounds |
@@ -379,8 +490,8 @@ Docling extraction, the corpus MCP server mounted by a third-party client.
 | ADR-023 | Tool-call fidelity is a hard constraint |
 | ADR-024 | gpt-oss:120b dropped; vLLM deferred, not rejected; SGLang a liability |
 | ADR-025 | Embeddings run locally until the server exposes one |
-| ADR-026 | Multi-agent decomposition lost to the single agent, twice. `yoyo agent` is the default. |
-| ADR-027 | qwen3-coder-next promoted to `supervisor`/`worker`: 7/7 gates, 4.3x faster, but serialises. |
+| ADR-026 | Graph vs single agent — reversed on round 3, confirmed on round 4 |
+| ADR-027 | qwen3-coder-next promoted to the tool-using roles |
 
 Authoritative log: the Claude project docs `yoyo-architecture-decisions-2026-08-14.md` and
 `yoyo-open-questions-ledger.md`. `docs/adr/` mirrors ADR-021 only.
@@ -409,7 +520,11 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-14 | Tool registry, bounded agent loop, golden eval set — **7/7 live**, all four hard gates. |
 | 2026-08-14 | MCP both directions: client adapter, vault server, corpus server. Live vault turn correct across vault + corpus. Tuned 260 s/8 iters → **148 s/6 iters, completed**. |
 | 2026-08-14 | Mail MCP: Gmail + Microsoft 365, read and draft, no send path. 168 tests. |
-| 2026-08-15 | Git initialised (`bbc89d2`, 56 files). Fixed a regression where a transfer archive re-disabled the vault MCP server. |
-| 2026-08-15 | **ADR-026: graph lost the single-agent baseline twice** (148 s single vs 360 s then 446 s). Fixes improved the answer and worsened latency. Planner now told decomposition is expensive and to prefer one subtask; `yoyo agent` documented as the default. Stopped tuning: two losses is a signal, not noise. |
-| 2026-08-15 | Graph ran live and lost to the single agent (360 s/13 tool calls vs 148 s/5, and a more hedged answer). Root cause: workers saw only their subtask, not the user's question, so one reported a term "does not appear" while its substance sat in its own results. Fixed: workers now receive the original question plus an anti-literalism instruction; duplicate tool calls are short-circuited mechanically. Needs re-measuring. |
-| 2026-08-15 | LangGraph supervisor graph: plan → parallel workers → synthesise, with structured output through `llm.py` rather than PydanticAI. 198 tests. |
+| 2026-08-14 | Mail MCP: Gmail + Microsoft 365, read and draft, no send path. 168 tests. |
+| 2026-08-15 | Git remote set up (`tethik01/yoyo-client`). LangGraph supervisor graph built; PydanticAI rejected. |
+| 2026-08-15 | **qwen3-coder-next promoted** (ADR-027): 7/7 gates, 50 tok/s vs `agent`'s 11.7. Serialises (1.09x) — no fan-out benefit, but nearly all use is single-stream. `reasoning` must never be set on a coder role (Ollama 500). |
+| 2026-08-15 | Fabricated citation path observed live twice on `coder`. Fixed in four prompts, a mechanical eval gate, and `citations.py` — the interactive path strips and warns, the gate still fails. |
+| 2026-08-15 | **ADR-026 reversed.** On `coder`, `yoyo agent` answered a two-part question in 8.3 s and got it **wrong** — tunnelled into the vault, never called `search_corpus`. `yoyo plan` got it right in 23.6 s. |
+| 2026-08-15 | Source-tunnelling fixed: untried-source hint at 2 calls, plus a prompt rule that "not in the notes" ≠ "not there". Patched agent now answers both parts correctly — in 30.1 s, still losing to the graph's 23.6 s. **ADR-026 confirmed on round 4.** |
+| 2026-08-15 | `PLANNER_INSTRUCTION` rewritten: the "roughly three times slower" warning was measured on `agent` and is false on `coder`. Split criterion is now source difference, and "when unsure, SPLIT". |
+| 2026-08-15 | README §6 expanded into a full command reference — every command, what it is for, and which of the three asking modes to reach for. 256 tests. |
