@@ -103,6 +103,46 @@ def ingest_path(root: Path, recursive: bool = True) -> IngestReport:
     return report
 
 
+def ingest_text(
+    source_path: str,
+    title: str,
+    text: str,
+    mime_type: str = "text",
+) -> bool:
+    """Ingest text that is not a file on disk. Returns True if it changed.
+
+    Added for conversation transcripts, which have no path to walk but are otherwise ordinary
+    documents — same chunking, same embeddings, same citation ids. A separate retrieval path
+    for "memory" would be a second thing to get subtly wrong, and would break the property
+    that `[12]` resolves the same way whatever produced it.
+    """
+    cfg = get_models()
+    vectors.ensure_collection(embeddings.dimensions())
+
+    digest = _hash(text)
+    with db.connection() as conn:
+        with db.transaction(conn):
+            doc_id, changed = db.upsert_document(
+                conn,
+                source_path=source_path,
+                title=title,
+                content_hash=digest,
+                mime_type=mime_type,
+                byte_size=len(text.encode("utf-8")),
+            )
+            if not changed:
+                return False
+            pieces = chunk_text(text, cfg.retrieval.chunk_size, cfg.retrieval.chunk_overlap)
+            db.insert_chunks(conn, doc_id, [p.as_row() for p in pieces])
+
+        # Outside the transaction: vectors for the old revision are stale the moment the
+        # chunks are rebuilt, and deleting them inside would hold the write lock over a
+        # network call to Qdrant.
+        vectors.delete_document(doc_id)
+        embed_pending(conn)
+    return True
+
+
 def embed_pending(conn) -> int:  # noqa: ANN001 - sqlite3.Connection
     """Embed every chunk that has no vector yet. Safe to re-run; resumes where it stopped."""
     cfg = get_models()

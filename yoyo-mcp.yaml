@@ -32,7 +32,7 @@ servers:
   calendar:
     command: python
     args: ["-m", "yoyo.mcp.calendar_server"]
-    enabled: false
+    enabled: true          # read-only; no create/update/delete/RSVP tool exists
     prefix: cal
 
   # Web search + fetch, via your own SearXNG. THE ONLY SERVER THAT SENDS DATA OUT and
@@ -51,10 +51,34 @@ servers:
     enabled: true          # personal Gmail live 2026-08-15. Read + draft only, no send.
     prefix: mail
 
-  # Off-the-shelf example: the reference filesystem server, scoped to one folder.
-  # Requires Node. Uncomment and set a real path to use it.
-  # files:
-  #   command: npx
-  #   args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/Projects"]
-  #   enabled: false
-  #   prefix: fs
+  # Off-the-shelf, third-party: the reference filesystem server. Needs Node (npx).
+  #
+  # ┌─ READ-ONLY BY ALLOWLIST, DELIBERATELY ──────────────────────────────────────┐
+  # │ This server ALSO ships write_file, edit_file, move_file and                  │
+  # │ create_directory. Mounting it whole would give an agent write access to      │
+  # │ everything under the paths below — including Yoyo's own source — and void    │
+  # │ the rule that Yoyo proposes and a human disposes.                            │
+  # │                                                                              │
+  # │ `allow` lists the ONLY tools that get registered. The model never learns the │
+  # │ write tools exist, which is stronger than telling it not to call them.       │
+  # │ Widen this list only with a reason you would write down.                     │
+  # └──────────────────────────────────────────────────────────────────────────────┘
+  #
+  # The trailing paths are the roots it may read. Scope them narrowly: everything
+  # reachable from here can end up in a model's context.
+  files:
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-filesystem"
+      - "C:/Projects/Yoyo/Notes"
+    enabled: true
+    prefix: fs
+    allow:
+      - read_text_file
+      - read_file
+      - list_directory
+      - directory_tree
+      - search_files
+      - get_file_info
+      - list_allowed_directories

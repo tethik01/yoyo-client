@@ -35,6 +35,21 @@ log = logging.getLogger(__name__)
 
 CONFIG_FILE = REPO_ROOT / "yoyo-calendar.yaml"
 
+
+def config_path() -> Path:
+    """Where accounts are declared.
+
+    Overridable with YOYO_CALENDAR_CONFIG so the MCP server can be exercised against a known
+    config instead of whatever the owner happens to have enabled. A test that reads the
+    shipped file passes or fails depending on the developer's own setup, which makes it
+    worthless as a check on behaviour — that is exactly how the "refuses to start with no
+    accounts" test broke the moment a real calendar was configured.
+    """
+    import os
+
+    override = os.environ.get("YOYO_CALENDAR_CONFIG")
+    return Path(override) if override else CONFIG_FILE
+
 __all__ = [
     "AccountSpec",
     "AuthRequired",
@@ -73,7 +88,7 @@ def token_dir() -> Path:
 
 
 def load_accounts(path: Path | None = None) -> list[AccountSpec]:
-    path = path or CONFIG_FILE
+    path = path or config_path()
     if not path.exists():
         return []
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

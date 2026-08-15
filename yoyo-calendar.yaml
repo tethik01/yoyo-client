@@ -32,7 +32,7 @@ accounts:
     provider: google
     client_secrets: secrets/gmail-personal.json   # yes, the same file as mail
     calendar_id: primary
-    enabled: false
+    enabled: true          # Calendar API enabled on the same project 2026-08-15
     description: Personal Google Calendar
 
   # --- Microsoft 365 ---------------------------------------------------------

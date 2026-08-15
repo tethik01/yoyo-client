@@ -12,7 +12,6 @@ import pytest
 from yoyo.mcp import client
 from yoyo.tools import Registry, ToolError
 
-
 # ------------------------------------------------------------- config ----
 
 
@@ -331,3 +330,72 @@ def test_unrelated_names_still_get_the_prefix():
     spec = client.ServerSpec("fs", "npx", prefix="fs")
     assert spec.tool_name("read_file") == "fs_read_file"
     assert spec.tool_name("fsck") == "fs_fsck"  # not a prefix match: needs the separator
+
+
+# --------------------------------------------- tool filtering (2026-08-15) -----
+# Added when wiring the reference filesystem server. It ships write_file, edit_file,
+# move_file and create_directory alongside its read tools. Mounting it whole would have
+# handed an agent write access to the folder and voided invariant #10 — Yoyo proposes, a
+# human disposes — without anyone deciding to.
+
+
+def test_a_spec_with_no_filters_permits_everything():
+    spec = client.ServerSpec(name="fs", command="npx")
+    for name in ("read_file", "write_file", "anything_at_all"):
+        assert spec.permits(name)
+
+
+def test_deny_refuses_the_named_tools():
+    spec = client.ServerSpec(name="fs", command="npx", deny=["write_file", "move_file"])
+    assert spec.permits("read_file")
+    assert not spec.permits("write_file")
+    assert not spec.permits("move_file")
+
+
+def test_allow_is_exclusive_not_additive():
+    """An allowlist that merely added to the default would be a footgun: a new release of a
+    third-party server could introduce a write tool and it would mount silently."""
+    spec = client.ServerSpec(name="fs", command="npx", allow=["read_file"])
+    assert spec.permits("read_file")
+    assert not spec.permits("list_directory")
+    assert not spec.permits("write_file")
+
+
+def test_deny_wins_over_allow():
+    spec = client.ServerSpec(
+        name="fs", command="npx", allow=["read_file", "write_file"], deny=["write_file"]
+    )
+    assert spec.permits("read_file")
+    assert not spec.permits("write_file")
+
+
+def test_filters_load_from_the_yaml(tmp_path):
+    path = tmp_path / "yoyo-mcp.yaml"
+    path.write_text(
+        "servers:\n"
+        "  files:\n"
+        "    command: npx\n"
+        "    args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp']\n"
+        "    allow: [read_file, list_directory]\n"
+        "    deny: [write_file]\n",
+        encoding="utf-8",
+    )
+    spec = client.load_config(path)[0]
+    assert spec.allow == ["read_file", "list_directory"]
+    assert spec.deny == ["write_file"]
+
+
+def test_the_shipped_filesystem_server_is_read_only():
+    """Guards the config that ships, not just the mechanism. If someone widens this
+    allowlist to include a write tool, that should be a deliberate act that breaks a test."""
+    from pathlib import Path as _P
+
+    specs = {s.name: s for s in client.load_config(_P("yoyo-mcp.yaml"))}
+    files = specs.get("files")
+    if files is None:
+        pytest.skip("no filesystem server configured")
+    assert files.allow, "the filesystem server must be mounted by allowlist, not wholesale"
+    for banned in ("write", "edit", "move", "create", "delete"):
+        assert not any(banned in tool for tool in files.allow), (
+            f"the filesystem allowlist includes a {banned} tool"
+        )

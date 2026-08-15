@@ -1082,5 +1082,30 @@ def web_egress(limit: int = typer.Option(30)) -> None:
     console.print(f"[dim]{web_mod.egress_log_path()}[/]")
 
 
+@app.command()
+def remember(
+    conversation: Optional[int] = typer.Option(None, help="One conversation id; default all"),  # noqa: UP045
+    min_turns: int = typer.Option(1, help="Skip conversations shorter than this"),
+) -> None:
+    """Make past conversations searchable — Phase 1 of memory.
+
+    Verbatim only. This stores what was said, it does not summarise or extract anything, and
+    that is the point: everything the wiki layer writes later must trace back to a raw source,
+    and this is what a raw source is.
+    """
+    _setup_logging()
+    from .memory import sources as memory_sources
+
+    report = memory_sources.remember(
+        conversation_ids=[conversation] if conversation else None,
+        min_turns=min_turns,
+    )
+    console.print(f"[green]{report.summary()}[/]")
+    if not report.conversations:
+        console.print("[dim]Nothing to remember yet — have a conversation first.[/]")
+        return
+    console.print("[dim]Past conversations are now searchable: `yoyo search \"...\"`[/]")
+
+
 if __name__ == "__main__":
     app()

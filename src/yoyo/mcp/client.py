@@ -27,7 +27,8 @@ import yaml
 from pydantic import BaseModel, create_model
 
 from ..config import REPO_ROOT
-from ..tools import Tool, ToolError, registry as default_registry
+from ..tools import Tool, ToolError
+from ..tools import registry as default_registry
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,27 @@ class ServerSpec:
     cwd: str | None = None
     enabled: bool = True
     prefix: str | None = None   # tool-name prefix; defaults to the server name
+    #: Remote tool names to expose. Empty = all of them.
+    allow: list[str] = field(default_factory=list)
+    #: Remote tool names to refuse, applied after `allow`.
+    deny: list[str] = field(default_factory=list)
+
+    def permits(self, remote: str) -> bool:
+        """Whether a remote tool may be registered.
+
+        Third-party servers decide their own surface, and that surface is often wider than
+        you want. The reference filesystem server ships `write_file`, `edit_file`,
+        `move_file` and `create_directory` alongside its read tools — mounting it whole
+        would hand an agent write access to the folder and quietly void the rule that Yoyo
+        proposes and a human disposes.
+
+        A capability you did not choose is one you did not think about. Filtering at the
+        mount boundary means the model never learns the tool exists, which is stronger than
+        instructing it not to call one it can see.
+        """
+        if self.allow and remote not in self.allow:
+            return False
+        return remote not in self.deny
 
     def tool_name(self, remote: str) -> str:
         """Namespace a remote tool, without stuttering.
@@ -335,10 +357,21 @@ def mount(spec: ServerSpec, into=None) -> list[str]:  # noqa: ANN001
     _sessions[spec.name] = session
 
     names: list[str] = []
+    refused: list[str] = []
     for remote in session.tools:
+        remote_name = _attr(remote, "name") or ""
+        if not spec.permits(remote_name):
+            refused.append(remote_name)
+            continue
         tool = adapt(session, remote)
         into.add(tool)
         names.append(tool.name)
+    if refused:
+        # Logged, not silent: a tool that vanished because of config looks identical to a
+        # tool that never existed, and that is the confusion that cost an afternoon with
+        # `web_search`.
+        log.info("%s: withheld %d tool(s) by policy: %s",
+                 spec.name, len(refused), ", ".join(sorted(refused)))
     return names
 
 

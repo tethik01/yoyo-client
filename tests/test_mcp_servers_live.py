@@ -147,11 +147,19 @@ def test_corpus_server_tools_carry_descriptions():
 # -------------------------------------------------------------- calendar server ---
 
 
-def test_calendar_server_refuses_to_start_with_no_accounts_and_says_why():
-    """The success path needs OAuth, so this covers what a user will actually hit first."""
+def test_calendar_server_refuses_to_start_with_no_accounts_and_says_why(tmp_path):
+    """The success path needs OAuth, so this covers what a user will actually hit first.
+
+    Pointed at a temp config rather than the shipped one: reading the real file made this
+    test pass or fail according to whether the developer had a calendar configured, which
+    is no check on behaviour at all. It broke the moment a real account was enabled.
+    """
+    empty = tmp_path / "yoyo-calendar.yaml"
+    empty.write_text("accounts: {}\n", encoding="utf-8")
     proc = subprocess.run(  # noqa: S603
         [sys.executable, "-m", "yoyo.mcp.calendar_server"],
-        env={"PYTHONPATH": "src", "PATH": "/usr/bin:/bin"},
+        env={"PYTHONPATH": "src", "PATH": "/usr/bin:/bin",
+             "YOYO_CALENDAR_CONFIG": str(empty)},
         capture_output=True,
         text=True,
         timeout=60,

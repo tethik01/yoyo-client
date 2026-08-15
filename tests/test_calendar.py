@@ -310,3 +310,15 @@ def test_short_fractional_seconds_are_left_alone():
     parsed = parse_iso("2026-08-14T09:00:00.123+02:00")
     assert parsed.microsecond == 123000
     assert parsed.utcoffset() == timedelta(hours=2)
+
+
+def test_the_config_path_is_overridable(monkeypatch, tmp_path):
+    """So the MCP server can be tested against a known config rather than whatever the
+    owner has enabled today."""
+    monkeypatch.setenv("YOYO_CALENDAR_CONFIG", str(tmp_path / "custom.yaml"))
+    assert cal.config_path() == tmp_path / "custom.yaml"
+
+
+def test_without_the_override_the_shipped_config_is_used(monkeypatch):
+    monkeypatch.delenv("YOYO_CALENDAR_CONFIG", raising=False)
+    assert cal.config_path() == cal.CONFIG_FILE

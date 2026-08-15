@@ -9,8 +9,12 @@ describes; if it disagrees with the code, the file is the bug.
 - **Last updated:** 2026-08-15 (day 3, later)
 - **Phase:** Phase 0 complete on the critical path. Orchestration measured and settled.
   Mail built but awaiting OAuth setup.
-- **Tests:** 608 passing
+- **Tests:** 632 passing
 - **Only gate on a real corpus:** OQ4 — the disk is not encrypted
+
+**Start here if you just want to USE it:** [`USER-GUIDE.md`](USER-GUIDE.md) — the three
+modes, vault vs corpus, citations, and what it gets wrong. This file is the build status;
+that one is how to drive it.
 
 **Primary sources, authoritative over this summary:** `yoyo-client-handoff.md` (the endpoint
 contract) and `docs/model-baseline-gb10.md` (the measurements).
@@ -197,9 +201,11 @@ re-comparing once `think: false` is set on the server.
 | HTTP API + streaming | ✅ | `api.py` — `/ask/stream` covered against a mocked model |
 | Web UI | 🟡 | `static/index.html` — tool calls, clickable citations, conversation history |
 | Conversation memory | ✅ | agent and graph turns persisted; follow-ups replay prior turns |
+| Memory Phase 1 — conversations as raw sources | ✅ | `memory/sources.py`, `yoyo remember` |
+| Memory Phase 2+ — the wiki layer | ⬜ | entity/concept pages; claims must cite raw sources, never other pages |
 | Vault map (UI) | 🟡 | `/vault/graph` + hand-rolled force layout — corpus overlay, broken links kept |
 | Citation resolution endpoint | ✅ | `/citation/<id>` — chunks, mail and notes through one route |
-| CLI (42 commands) | ✅ | `cli.py` — documented in §6 |
+| CLI (43 commands) | ✅ | `cli.py` — documented in §6 |
 | Backup / restore drill | ✅ | `backup.py` — 11/11 on the real drive |
 | Tool registry, 4 built-ins | ✅ | `tools.py` |
 | Bounded agent loop | ✅ | `agent.py` — iteration + wall-clock budgets |
@@ -211,8 +217,10 @@ re-comparing once `think: false` is set on the server.
 | Vault MCP server | ✅ | `mcp/vault_server.py` — drafts-only write |
 | Corpus MCP server | ✅ | `mcp/corpus_server.py` — live stdio round trip |
 | Mail MCP server (Gmail + M365) | 🟡 | `mail/`, `mcp/mail_server.py` — **needs OAuth setup** |
-| Calendar adapters + MCP (read-only) | 🟡 | `calendar/`, `mcp/calendar_server.py` — **shares mail's OAuth app** |
+| Calendar adapters + MCP (read-only) | 🟡 | `calendar/`, `mcp/calendar_server.py` — enabled; awaiting `yoyo calendar auth` |
 | Tasks MCP over the vault | 🟡 | `tasks.py`, `mcp/tasks_server.py` — no credentials needed |
+| Filesystem MCP (third-party) | 🟡 | `yoyo-mcp.yaml` — read-only by allowlist, scoped to `Notes` |
+| MCP tool allow/deny filtering | ✅ | `mcp/client.py::ServerSpec.permits` |
 | Web search + fetch (SearXNG) | 🟡 | `websearch.py`, `mcp/search_server.py` — SSRF gate, untrusted-content framing |
 | Egress logging | ✅ | `data/egress.jsonl` — partial answer to OQ5 |
 | STT — faster-whisper, local | 🟡 | `voice/whisper.py` — needs `pip install -e ".[voice]"` |
@@ -374,6 +382,7 @@ means pass; `doctor` and `restore-drill` return 1 on failure so they can gate a 
 | `yoyo ingest <path>` | Reads a file or folder into the corpus: extracts text, chunks it (1200 chars / 150 overlap), stores in SQLite, embeds into Qdrant. `--no-recursive` to stay in one folder. **Idempotent by content hash** — re-running on unchanged files skips them, so you can point it at the same folder daily. Reports new/changed/unchanged and lists failures rather than dying on one bad file. |
 | `yoyo search "q"` | Hybrid retrieval **without calling a model**. Shows the passages, their chunk ids and fusion scores. Use this to separate "retrieval didn't find it" from "the model ignored it" — the single most useful debugging move when an answer is wrong. `--top-k N` (default 6). |
 | `yoyo reindex` | Re-embeds chunks that have no vector. Cheap; safe to run any time. |
+| `yoyo remember` | Makes past conversations searchable — **Phase 1 of memory**. Verbatim only: it stores what was said and interprets nothing. `--conversation N` for one, `--min-turns N` to skip thin ones. Idempotent, content-hashed. |
 | `yoyo reindex --recreate` | Drops the Qdrant collection and re-embeds **everything**. Required after changing the embed model or its dimensions in `yoyo-models.yaml` — vectors from different models are not comparable, and mixing them silently degrades retrieval rather than erroring. |
 
 ### 6.3 Asking — three escalating modes
@@ -429,6 +438,14 @@ exposes its own capabilities as servers other clients can mount.
 | `yoyo mcp serve-tasks` | Runs the vault-tasks server over stdio. Read-only; there is no tool that can tick a box. |
 | `yoyo mcp serve-calendar` | Runs the calendar server over stdio. Read-only; no create, update, delete or RSVP tool exists. |
 | `yoyo mcp serve-search` | Runs the web search + fetch server over stdio. **The only server that sends data out.** |
+
+**Mounting someone else's server** is config only — see `yoyo-mcp.yaml`. One thing matters
+more than the mechanics: `allow` is an **exclusive** allowlist and `deny` overrides it.
+Third-party servers pick their own surface and it is usually wider than you want; the
+reference filesystem server ships `write_file`, `edit_file` and `move_file` beside its read
+tools. Filtering at the mount boundary means the model never learns a tool exists, which is
+stronger than instructing it not to call one it can see. A test asserts the shipped
+filesystem allowlist contains no write tool.
 
 The `serve-*` commands are not meant to be run by hand — they are what another MCP client
 (Claude Desktop, or Yoyo itself) launches as a subprocess. Running one in a terminal just
@@ -670,19 +687,19 @@ Breaking these is a bug, not a style choice.
 ## 10. Tests
 
 ```powershell
-pytest -q          # 608 passing
+pytest -q          # 632 passing
 ruff check src tests
 ```
 
 | Area | Tests | Covers |
 |---|---|---|
-| Doctor / CLI | 69 | every one of the 36 commands renders its help; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
+| Doctor / CLI | 70 | every one of the 36 commands renders its help; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
 | Tasks | 50 | every checkbox flavour, four due-date dialects, completion-date-is-not-a-due-date, drafts excluded, **structural proof nothing can tick a box** |
 | Eval harness | 40 | fidelity gate catches a fabricating model, retry gate fails give-up-after-one-error, abstention both directions, `--role` override reaches every runner |
-| Calendar | 37 | ISO offsets incl. Graph's 7-digit fractions, local day bounds, conflict maths (back-to-back is not a clash), declined/cancelled exclusion, **structural proof of no write path and read-only scopes** |
+| Calendar | 39 | ISO offsets incl. Graph's 7-digit fractions, local day bounds, conflict maths (back-to-back is not a clash), declined/cancelled exclusion, **structural proof of no write path and read-only scopes** |
 | Voice | 36 | timestamp formatting, speakable-text stripping, config validation, PowerShell quoting, **structural proof no voice module imports a network client** |
 | Agent / tools | 50 | arg validation, errors surfaced not raised, iteration + wall-clock budgets, forced answer on exhaustion, duplicate short-circuit, **untried-source hint**, **fabricated-path stripping** |
-| MCP client | 30 | config, schema translation, result unwrapping, SDK field-name drift, failure diagnostics, live stdio round trip |
+| MCP client | 36 | config, schema translation, result unwrapping, SDK field-name drift, failure diagnostics, live stdio round trip |
 | Vault | 28 | path confinement both directions, symlink escape, frontmatter, backlinks, drafts-only writes, drafts excluded from canon |
 | Web search | 42 | SSRF gate incl. DNS-resolves-to-loopback, non-http schemes refused, **untrusted-content framing kept not stripped**, egress log survives corruption, the SearXNG 403 explains itself |
 | Mail | 41 | config, account resolution, Gmail/Graph parsing, HTML→text, MIME round trip, **structural proof no send path exists** |
@@ -697,6 +714,7 @@ ruff check src tests
 | Storage | 8 | migrations, hash skip, chunk rebuild, FTS, ordering |
 | Chunking | 8 | boundaries, coverage, ordinals, size bounds |
 | Citations | 17 | scrubber keeps real identifiers, replaces invented paths visibly, gate and scrubber share one regex |
+| Memory (raw sources) | 15 | verbatim transcripts, speaker labels, trivial turns skipped, **structural proof the raw layer never calls a model** |
 | Retrieval | 6 | RRF ranking, context budget, citations |
 
 **Not covered — assume broken until exercised:** every mail and calendar **network** path
@@ -805,3 +823,8 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-15 | **ADR-026 round 5 — three sources, and a new failure.** `yoyo agent` (31.8 s) answered *"your notes describe the GB10…"* and cited a **corpus** document; the vault held one empty file. `yoyo plan` (51.3 s) correctly reported the notes contained nothing and said how it established that. Slower and more honest. Sixth variant of confidently-wrong: not absence unestablished, but **presence attributed to the wrong source**. Neither called `web_search` for the "current spec" part. |
 | 2026-08-15 | **Vault map in the UI.** Notes and `[[wikilinks]]` as a force-directed graph, hand-rolled (no CDN, no d3). Overlays which notes the corpus has ingested — the exact vault/corpus distinction the agent got wrong. Links to unwritten notes are kept as nodes, as Obsidian does. |
 | 2026-08-15 | Third time a test policed a string rather than behaviour: `/vault/graph` failed a test banning any path containing "/vault". The invariant was never "no vault routes", it is "no vault WRITES" — now checked by HTTP method. |
+| 2026-08-15 | **`USER-GUIDE.md` written** — how to drive the system rather than what is built. The three modes and when each is wrong, vault vs corpus (the distinction the assistant itself got wrong), following citations, and a frank section on the six confidently-wrong failures found so far. |
+| 2026-08-15 | **MCP tool allow/deny filtering**, added while wiring the reference filesystem server. It ships write tools beside its read tools; mounting it whole would have handed an agent write access to a folder and voided invariant #10 without anyone deciding to. `allow` is exclusive, `deny` wins, withheld tools are logged rather than vanishing silently. Filesystem server now live, read-only, scoped to `Notes`. |
+| 2026-08-15 | Calendar account and MCP server enabled, sharing mail's OAuth client. `YOYO_CALENDAR_CONFIG` added so the server's "no accounts configured" test points at a temp file — reading the shipped config made it pass or fail by whether the developer happened to have a calendar set up, which is no check on behaviour. It broke the moment a real account was enabled, which is how the flaw showed. |
+| 2026-08-15 | **Second-brain roadmap agreed** (project doc `yoyo-second-brain-roadmap.md`), adopting Karpathy's three-layer wiki pattern: raw sources → LLM-written wiki → governing schema. The owner chose auto-write over a review queue, and that is defensible *because of the pattern's own rule* — **a claim must trace to a raw source and never to another wiki page**, so a fabrication cannot compound. Sources: conversations and the owner's own notes. Mail and calendar deliberately excluded for now. |
+| 2026-08-15 | **Memory Phase 1** — `yoyo remember` makes past conversations searchable as verbatim corpus documents, speaker-labelled and timestamped. Deliberately dumb: a structural test asserts the raw-source layer never calls a model, because everything the wiki layer writes later must quote text no model generated. Also `ingest_text()`, so non-file sources reuse the whole existing chunk/embed/cite pipeline rather than growing a second retrieval path. |
