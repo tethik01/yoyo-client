@@ -15,7 +15,7 @@ from . import agent as agent_mod
 from . import backup as backup_mod
 from . import bench as bench_mod
 from . import calendar as cal_mod
-from . import core, doctor
+from . import core, doctor, router
 from . import evals as evals_mod
 from . import mail as mail_mod
 from . import tasks as tasks_mod
@@ -29,6 +29,7 @@ from .mcp import client as mcp_client
 from .rag import ingest as ingest_mod
 from .rag import retrieve as rag
 from .storage import db, vectors
+from .voice import speech as voice_speech
 
 app = typer.Typer(help="Yoyo — local assistant. Inference runs on MyAIServer.", no_args_is_help=True)
 console = Console()
@@ -273,6 +274,73 @@ def agent(
         console.print(f"[dim]  {mark} {escape(inv.name)}({escape(str(inv.arguments))})[/]")
         if not inv.ok:
             console.print(f"[dim]       {escape(inv.error or '')}[/]")
+
+
+@app.command()
+def do(
+    question: str,
+    mode: Optional[str] = typer.Option(  # noqa: UP045
+        None, help="Force ask | agent | plan. Omit to let Yoyo choose."
+    ),
+    rules_only: bool = typer.Option(
+        False, "--rules-only", help="Skip the classifier — deterministic routing only"
+    ),
+    conversation: Optional[int] = typer.Option(None, help="Continue a conversation"),  # noqa: UP045
+    mcp: bool = typer.Option(True, help="Mount MCP servers from yoyo-mcp.yaml"),
+) -> None:
+    """Ask without picking a mode — Yoyo routes, says what it chose, and you can override.
+
+    The choice is printed before the answer, every time. Routing that you cannot see is
+    routing you cannot correct, and the mode choice was doing real safety work: `ask` has no
+    tools and will answer a question about your mail anyway.
+    """
+    _setup_logging()
+    if mcp:
+        for name, r in mcp_client.mount_all().items():
+            if not r["ok"]:
+                console.print(f"[yellow]mcp {name}: {escape(r['error'])}[/]")
+
+    try:
+        answer = router.run(question, override=mode, conversation_id=conversation,
+                            use_model=not rules_only)
+    except router.RouteError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    decision = answer.route
+    console.print(f"[cyan]▸ {decision.mode}[/] [dim]— {escape(decision.reason)}[/]")
+    if decision.decided_by in {"rules", "fallback"}:
+        console.print(f"[dim]  (decided by {decision.decided_by})[/]")
+    console.print()
+    console.print(escape(answer.text))
+    if answer.fabricated_links:
+        console.print(
+            f"\n[yellow]warning: removed {len(answer.fabricated_links)} fabricated "
+            f"citation path(s)[/]"
+        )
+    console.print(f"\n[dim]{answer.model} · {answer.latency_ms} ms · {answer.detail}[/]")
+    console.print("[dim]not what you wanted? re-run with --mode ask|agent|plan[/]")
+
+
+@app.command()
+def route(
+    question: str,
+    rules_only: bool = typer.Option(False, "--rules-only", help="Deterministic routing only"),
+) -> None:
+    """Show how a question would be routed, without answering it.
+
+    Exists so routing is inspectable on its own. A misrouted answer and a bad answer look
+    identical from the outside; this separates them.
+    """
+    _setup_logging()
+    decision = router.route(question, use_model=not rules_only)
+    table = Table(show_header=False, box=None)
+    table.add_row("mode", f"[cyan]{decision.mode}[/]")
+    table.add_row("reason", escape(decision.reason))
+    table.add_row("decided by", decision.decided_by)
+    table.add_row("rules floor", decision.floor)
+    table.add_row("signals", escape(", ".join(decision.signals) or "none"))
+    table.add_row("question", escape(decision.question))
+    console.print(table)
 
 
 @app.command()
@@ -692,9 +760,14 @@ def say(
 
 @app.command()
 def talk(
-    mode: str = typer.Option("agent", help="ask | agent | plan — how each turn is answered"),
+    mode: str = typer.Option(
+        "auto", help="auto | ask | agent | plan — auto lets Yoyo route each turn"
+    ),
     device: Optional[int] = typer.Option(None, help="Microphone index"),  # noqa: UP045
     speak_reply: bool = typer.Option(True, "--speak/--no-speak", help="Read answers aloud"),
+    full_text: bool = typer.Option(
+        False, "--full-text", help="Speak the written answer verbatim, citations and all"
+    ),
     mcp: bool = typer.Option(True, help="Mount MCP servers from yoyo-mcp.yaml"),
 ) -> None:
     """Push-to-talk conversation. ENTER starts recording, ENTER stops it.
@@ -702,10 +775,15 @@ def talk(
     Not held-key push-to-talk: reading a physical key state needs a raw console handler that
     behaves differently across Windows terminals, and a voice loop that works in one shell
     and silently fails in another is worse than one extra keypress.
+
+    Two things differ from the written path, both deliberate. Each turn is **routed** (say
+    "plan:" or "use ask mode" out loud to override), and what is *spoken* is a reshaped
+    answer — citations counted rather than recited, code announced rather than spelled out.
+    The written answer stays on screen unchanged and remains the source of truth.
     """
     _setup_logging()
-    if mode not in {"ask", "agent", "plan"}:
-        raise typer.BadParameter("mode must be ask, agent or plan")
+    if mode not in {"auto", "ask", "agent", "plan"}:
+        raise typer.BadParameter("mode must be auto, ask, agent or plan")
 
     cfg = voice_mod.load_config()
     stt = voice_mod.get_transcriber(cfg)
@@ -720,7 +798,7 @@ def talk(
             console.print(f"[yellow]{speaker.name} unusable — printing answers only.[/]")
             speaker = None
 
-    if mcp and mode in {"agent", "plan"}:
+    if mcp and mode != "ask":
         for name, r in mcp_client.mount_all().items():
             if not r["ok"]:
                 console.print(f"[yellow]mcp {name}: {escape(r['error'])}[/]")
@@ -770,30 +848,35 @@ def talk(
             console.print("[yellow]Nothing recognised. Try again closer to the mic.[/]")
             continue
 
-        if mode == "ask":
-            answer = core.ask(question, conversation_id=conversation)
-            conversation = answer.conversation_id or conversation
-            text, meta = answer.text, f"{answer.model} · {answer.latency_ms} ms"
-        elif mode == "agent":
-            result = agent_mod.run(question)
-            text = result.text
-            meta = f"{result.model} · {result.latency_ms} ms · {result.iterations} iters"
-            if result.fabricated_links:
-                console.print(
-                    f"[yellow]removed {len(result.fabricated_links)} fabricated path(s)[/]"
-                )
-        else:
-            result = graph_run(question)
-            text = result.answer
-            meta = (
-                f"{result.latency_ms / 1000:.1f}s · {result.subtask_count} subtasks"
+        try:
+            answer = router.run(
+                question,
+                override=None if mode == "auto" else mode,
+                conversation_id=conversation,
+            )
+        except router.RouteError as exc:
+            console.print(f"[yellow]{escape(str(exc))}[/]")
+            continue
+
+        conversation = answer.conversation_id or conversation
+        text = answer.text
+        console.print(f"[cyan]▸ {answer.route.mode}[/] [dim]— {escape(answer.route.reason)}[/]")
+        if answer.fabricated_links:
+            console.print(
+                f"[yellow]removed {len(answer.fabricated_links)} fabricated path(s)[/]"
             )
 
         console.print(escape(text))
-        console.print(f"[dim]{meta}[/]")
+        console.print(f"[dim]{answer.model} · {answer.latency_ms} ms · {answer.detail}[/]")
         if speaker:
+            # Announce the route out loud before answering. With no screen to glance at,
+            # an unannounced routing decision is invisible — and an invisible decision is
+            # one the owner cannot override, which is the whole design constraint.
+            spoken = text if full_text else voice_speech.for_speech(text)
+            if mode == "auto" and not full_text:
+                spoken = f"{voice_speech.route_announcement(answer.route.mode)} {spoken}"
             try:
-                speaker.speak(text)
+                speaker.speak(spoken)
             except voice_mod.VoiceError as exc:
                 console.print(f"[yellow]could not speak: {escape(str(exc))}[/]")
 
@@ -1105,6 +1188,113 @@ def remember(
         console.print("[dim]Nothing to remember yet — have a conversation first.[/]")
         return
     console.print("[dim]Past conversations are now searchable: `yoyo search \"...\"`[/]")
+
+
+memory_app = typer.Typer(help="Yoyo's memory — the second brain.")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("build")
+def memory_build(
+    conversation: Optional[int] = typer.Option(None, help="One conversation; default all"),  # noqa: UP045
+    notes: bool = typer.Option(True, help="Also read your own vault notes"),
+) -> None:
+    """Write memory pages from raw sources.
+
+    Every claim must quote its source verbatim, and no claim may cite another memory page.
+    Those two gates are why this can run without asking your permission first.
+    """
+    _setup_logging()
+    from . import vault as vault_mod
+    from .memory import build as build_mod
+    from .memory import sources as source_mod
+
+    raw: dict[str, str] = {}
+    for row in core.list_conversations(limit=1000):
+        cid = int(row["id"])
+        if conversation and cid != conversation:
+            continue
+        text, turns, _ = source_mod.render(cid, row.get("title"),
+                                           core.conversation_messages(cid))
+        if turns:
+            raw[source_mod.source_path(cid)] = text
+
+    if notes:
+        root = vault_mod.vault_root()
+        for note in vault_mod._notes(root):
+            raw[f"vault://{vault_mod._rel(note, root)}"] = note.read_text(
+                encoding="utf-8", errors="replace")
+
+    if not raw:
+        console.print("[yellow]No raw sources yet. Have a conversation or write a note.[/]")
+        raise typer.Exit(0)
+
+    console.print(f"[dim]reading {len(raw)} raw source(s)…[/]")
+    report = build_mod.build(raw)
+    console.print(f"[green]{report.summary()}[/]")
+
+    for subject, why in report.rejected[:10]:
+        console.print(f"[yellow]rejected[/] {escape(subject)}: {escape(why)}")
+    for question in report.ambiguities:
+        # Asked, never guessed: merging two people makes a page wrong about both.
+        console.print(f"[cyan]?[/] {escape(question['question'])}")
+    if report.ambiguities:
+        console.print("[dim]Answer by writing the note yourself, or tell me in a chat.[/]")
+
+
+@memory_app.command("show")
+def memory_show(subject: Optional[str] = typer.Argument(None)) -> None:  # noqa: UP045
+    """List memory pages, or show one."""
+    _setup_logging()
+    from . import vault as vault_mod
+    from .memory import build as build_mod
+
+    root = vault_mod.vault_root()
+    pages = build_mod.load_pages(root)
+    if not pages:
+        console.print("[dim]No memory yet — run `yoyo memory build`.[/]")
+        raise typer.Exit(0)
+
+    if subject is None:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("kind")
+        table.add_column("subject")
+        table.add_column("claims", justify="right")
+        for (kind, name), claims in sorted(pages.items()):
+            table.add_row(kind, escape(name), str(len(claims)))
+        console.print(table)
+        return
+
+    for (kind, name), claims in pages.items():
+        if name != subject.lower():
+            continue
+        console.print(f"[bold]{escape(subject)}[/] [dim]({kind})[/]\n")
+        for claim in claims:
+            console.print(f"  • {escape(claim.claim)}")
+            console.print(f"    [dim]{escape(claim.source)} — \"{escape(claim.quote)}\"[/]")
+        return
+    console.print(f"[yellow]No memory page for {escape(subject)}.[/]")
+
+
+@memory_app.command("forget")
+def memory_forget(
+    subject: str,
+    containing: Optional[str] = typer.Option(None, help="Only claims mentioning this"),  # noqa: UP045
+) -> None:
+    """Forget a subject, or specific claims about them.
+
+    This really deletes. The log records that something was forgotten and when — never what,
+    because a tombstone repeating the memory would not be forgetting.
+    """
+    _setup_logging()
+    from . import vault as vault_mod
+    from .memory import build as build_mod
+
+    touched = build_mod.forget(vault_mod.vault_root(), subject, contains=containing)
+    if touched:
+        console.print(f"[green]forgot {escape(subject)}[/] ({touched} page(s))")
+    else:
+        console.print(f"[yellow]nothing to forget about {escape(subject)}[/]")
 
 
 if __name__ == "__main__":

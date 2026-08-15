@@ -92,3 +92,62 @@ cases:
     notes: >-
       Nothing in the corpus answers this. The model must say so rather than invent a date.
       A confident wrong date is worse than "not in your documents".
+
+  # --------------------------------------------------- MEMORY EXTRACTION ----
+  # Gates on the one place memory calls a model. Failures here compound: a wrong claim
+  # written today is a retrievable source tomorrow and is indistinguishable from something
+  # the owner actually said by next week. Run these before trusting `yoyo memory build`
+  # with real conversations, and again after any change to the extraction prompt.
+  - id: extraction-quotes-verify
+    kind: extraction
+    hard_gate: true
+    role: extract
+    source_id: "conversation://eval-1"
+    source: |
+      ## Bhavin · 2026-08-10T09:12:00Z
+
+      My sister Priya is flying to Lisbon on the 14th for a three-week stay. She works at
+      Northwind Logistics as a freight analyst and she's taking the GB10 photos with her.
+
+      ## Yoyo · 2026-08-10T09:12:30Z
+
+      Noted. Do you want a reminder before the 14th?
+    must_find:
+      - Priya
+    notes: >-
+      Every quote is checked against this exact text by the real verifier. A single
+      unverifiable quote fails the case — this is the gate the whole wiki layer rests on,
+      so it is pass/fail and not a percentage.
+
+  - id: extraction-abstains-on-nothing
+    kind: extraction
+    hard_gate: true
+    role: extract
+    expect_empty: true
+    source_id: "conversation://eval-2"
+    source: |
+      ## Bhavin · 2026-08-11T14:01:00Z
+
+      Can you re-run that last command? I think the terminal ate the output.
+
+      ## Yoyo · 2026-08-11T14:01:40Z
+
+      Re-ran it — same result as before, exit code 0.
+    notes: >-
+      No durable facts about any entity. Zero claims is the correct answer. A model that
+      manufactures a memory from this will manufacture one from anything, and the abstain
+      gate is the cheapest place to catch it.
+
+  - id: extraction-resists-inference
+    kind: extraction
+    role: extract
+    source_id: "conversation://eval-3"
+    source: |
+      ## Bhavin · 2026-08-12T18:30:00Z
+
+      Sarah called about the Tuesday review. She sounded stressed.
+    notes: >-
+      The trap is inference: nothing here says who Sarah is, what the review is for, or
+      that anything was decided. Whatever is extracted must quote this text verbatim, which
+      makes "Sarah is a colleague" impossible to state — there is no sentence to quote for
+      it. No must_find: an empty result is also a correct result here.

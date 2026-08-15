@@ -9,7 +9,7 @@ describes; if it disagrees with the code, the file is the bug.
 - **Last updated:** 2026-08-15 (day 3, later)
 - **Phase:** Phase 0 complete on the critical path. Orchestration measured and settled.
   Mail built but awaiting OAuth setup.
-- **Tests:** 632 passing
+- **Tests:** 718 passing
 - **Only gate on a real corpus:** OQ4 — the disk is not encrypted
 
 **Start here if you just want to USE it:** [`USER-GUIDE.md`](USER-GUIDE.md) — the three
@@ -202,10 +202,14 @@ re-comparing once `think: false` is set on the server.
 | Web UI | 🟡 | `static/index.html` — tool calls, clickable citations, conversation history |
 | Conversation memory | ✅ | agent and graph turns persisted; follow-ups replay prior turns |
 | Memory Phase 1 — conversations as raw sources | ✅ | `memory/sources.py`, `yoyo remember` |
-| Memory Phase 2+ — the wiki layer | ⬜ | entity/concept pages; claims must cite raw sources, never other pages |
+| Memory Phase 2 — wiki layer | 🟡 | `memory/wiki.py`, `memory/extract.py` — verbatim-quote + source-kind gates |
+| Memory Phase 3 — identity | 🟡 | aliases asked not guessed; enriches your own note in a marked block |
+| Memory Phase 4 — contradictions | 🟡 | recorded as edges, never resolved; `yoyo memory forget` |
+| Memory schema doc (governance) | ✅ | `yoyo-memory/SCHEMA.md`, regenerated each build |
+| Memory Phase 5 — voice-first routing | 🟡 | `router.py` + `voice/speech.py` — `yoyo do`, `yoyo talk --mode auto`; engines still uninstalled |
 | Vault map (UI) | 🟡 | `/vault/graph` + hand-rolled force layout — corpus overlay, broken links kept |
 | Citation resolution endpoint | ✅ | `/citation/<id>` — chunks, mail and notes through one route |
-| CLI (43 commands) | ✅ | `cli.py` — documented in §6 |
+| CLI (48 commands) | ✅ | `cli.py` — documented in §6 |
 | Backup / restore drill | ✅ | `backup.py` — 11/11 on the real drive |
 | Tool registry, 4 built-ins | ✅ | `tools.py` |
 | Bounded agent loop | ✅ | `agent.py` — iteration + wall-clock budgets |
@@ -385,15 +389,18 @@ means pass; `doctor` and `restore-drill` return 1 on failure so they can gate a 
 | `yoyo remember` | Makes past conversations searchable — **Phase 1 of memory**. Verbatim only: it stores what was said and interprets nothing. `--conversation N` for one, `--min-turns N` to skip thin ones. Idempotent, content-hashed. |
 | `yoyo reindex --recreate` | Drops the Qdrant collection and re-embeds **everything**. Required after changing the embed model or its dimensions in `yoyo-models.yaml` — vectors from different models are not comparable, and mixing them silently degrades retrieval rather than erroring. |
 
-### 6.3 Asking — three escalating modes
+### 6.3 Asking — three escalating modes, or let Yoyo pick
 
 These are the three ways to get an answer, cheapest first. Picking the right one matters more
-than tuning any of them.
+than tuning any of them — which is exactly why `yoyo do` exists, and why it always tells you
+what it picked.
 
 | Command | What it does |
 |---|---|
 | `yoyo ask "q"` | **One retrieval, one model turn.** Retrieves passages, hands them to the model, prints the answer with numbered citations and the sources beneath. No tools, no loop. The default for "what do my documents say about X". `--role <name>` to use a different role, `--no-rag` to ask the model cold with no retrieval, `--conversation <id>` to continue a thread. |
 | `yoyo agent "q"` | **Tool-calling loop.** The model chooses tools (corpus search, vault, mail, clock) and iterates until it can answer. Bounded: 8 iterations and 600 s by default, `--max-iterations N` to change. Mounts MCP servers from `yoyo-mcp.yaml` unless `--no-mcp`. Prints every tool call with ok/err so you can see the reasoning path. Use when the answer needs a live lookup, or several. |
+| `yoyo do "q"` | **Routes for you.** Picks `ask`, `agent` or `plan`, prints the choice and the reason above the answer, then runs it. `--mode ask\|agent\|plan` overrides outright (no classifier call); `--rules-only` skips the classifier and uses the deterministic rules alone; `--conversation <id>` continues a thread. Say `plan: …` or "use ask mode" in the question itself and that wins. |
+| `yoyo route "q"` | Shows how a question **would** be routed — mode, reason, rules floor, signals — without answering it. A misrouted answer and a bad answer look identical from outside; this separates them. |
 | `yoyo plan "q"` | **Multi-agent research.** A planner decomposes the question, workers run **in parallel** with their own tool budgets, a synthesiser assembles the answer. `--max-subtasks N` (default 4), `--max-parallel N` (default 3). Prints the plan and its reasoning before the answer. Use for questions spanning different sources. |
 
 **Which one?** (ADR-026, four measured rounds)
@@ -404,6 +411,15 @@ than tuning any of them.
   a two-part question **wrongly** by searching only the vault and reporting "not found" for
   the half that was in the corpus.
 - Do not reach for `plan` to speed up a simple question — it is ~3x slower there.
+
+**And if you would rather not choose:** `yoyo do` classifies for you, with one deliberate
+bias — **uncertainty escalates, never downgrades.** A cheap deterministic pass (source words,
+time words, multi-part structure) computes the *least* capable mode that could be right; the
+model classifier may raise that and is clamped if it tries to lower it. Over-serving a simple
+question costs seconds. Under-serving a multi-source one costs an answer that is fluent,
+sourceless and wrong — `ask` has no tools and will answer a question about your mail anyway.
+Every choice is printed with its reason, and `--mode` overrides it. Routing you cannot see is
+routing you cannot correct.
 
 | Command | What it does |
 |---|---|
@@ -458,9 +474,16 @@ you optimise; both produce a verdict you act on.
 
 | Command | What it does |
 |---|---|
-| `yoyo eval` | Runs the golden set — 7 cases, 4 hard gates: **tool fidelity** (a probe tool holds an unguessable secret; the model must call it and report the value, fabricating instead is a hard fail), **tool retry** (the probe fails once — giving up after one error fails), **grounded** (the answer must cite a real chunk id and must contain no fabricated file path), **abstain** (the corpus cannot answer it; inventing an answer fails). `--only <case-or-kind>` to run one. Budget ~5 min for the full set. |
+| `yoyo eval` | Runs the golden set — 10 cases, 6 hard gates: **tool fidelity** (a probe tool holds an unguessable secret; the model must call it and report the value, fabricating instead is a hard fail), **tool retry** (the probe fails once — giving up after one error fails), **grounded** (the answer must cite a real chunk id and must contain no fabricated file path), **abstain** (the corpus cannot answer it; inventing an answer fails), and **extraction** (memory's only model call: every claim's quote is verified verbatim against the source, and a source with no durable facts must produce zero claims). `--only <case-or-kind>` to run one — `--only extraction` gates memory alone. Budget ~5 min for the full set. |
 | `yoyo eval --role <role>` | Same gates against a different role — **this is how a candidate model gets promoted**. A model that has not passed all four gates does not get pinned to a tool-using role, regardless of how fast it is. |
 | `yoyo bench --role <role>` | Measures single-stream speed and concurrency scaling for the capability behind a role. `--concurrency 1,4` sets the levels, `--repeats N` averages rounds. Reports aggregate tok/s, per-stream tok/s, scaling factor, and 429s **counted separately** so a per-key rate limit is never mistaken for the model serialising. Prints `NO MEASUREMENT` rather than a number when every request failed. |
+
+**Run `yoyo eval --only extraction` before pointing `yoyo memory build` at real
+conversations, and again after any change to the extraction prompt.** It is the only gate on
+the layer whose failures compound: a wrong claim written today is a retrievable source
+tomorrow and indistinguishable from something you actually said by next week. One
+unverifiable quote fails the case — not a percentage, because averaging away a fabrication
+in memory defeats the point of having the gate.
 
 **Why bench exists:** concurrency is **empirical** (ADR-022). Two architectural hypotheses
 were tested and both falsified — being MoE predicts nothing, and a sibling model's scaling
@@ -526,7 +549,44 @@ Three guards, all in code rather than config:
 `search.formats` in its `settings.yml` and restart, or every query returns 403 and looks
 like a network fault.
 
-### 6.8 Calendar and tasks
+### 6.8 Memory — the second brain
+
+| Command | What it does |
+|---|---|
+| `yoyo remember` | **Phase 1.** Past conversations become searchable, verbatim. Interprets nothing. |
+| `yoyo memory build` | **Phase 2–4.** Writes entity pages into `yoyo-memory/` from conversations and your notes. |
+| `yoyo memory show [subject]` | List memory pages, or read one with its sources and quotes. |
+| `yoyo memory forget <subject>` | Really deletes. `--containing` for specific claims. |
+
+Three layers, following the pattern the owner chose ([Karpathy's gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)):
+**raw sources** (immutable) → **the wiki** (Yoyo-written) → **the schema** (governance,
+regenerated at `yoyo-memory/SCHEMA.md`).
+
+**Memory writes automatically, with no approval step.** That is only safe because of one
+rule, enforced in code:
+
+> **A claim traces to a raw source. Never to another wiki page.**
+
+Without it, a fact extracted wrongly on Monday is a source on Tuesday, cited on Wednesday,
+and by Friday indistinguishable from something you said — the provenance would be *real*,
+because Yoyo did read it in its own notes. Two gates close that path, neither involving
+judgement:
+
+- **Verbatim quote.** Every claim carries a quote that must appear in the source it names.
+  No quote, or a quote the source does not contain, and the claim is discarded before it
+  reaches a page. Same trick as the golden eval's unguessable secret.
+- **Source kind.** A claim citing anything under `yoyo-memory/` is rejected outright.
+
+What it will not do: edit your prose (only a marked block in a note you already keep),
+resolve a contradiction (both claims are kept and the tension is shown — *"contradictions
+are recorded as edges rather than resolved"*), or guess whether "Mom" and a name are the
+same person (it asks). `log.md` is append-only, so the record of what memory did cannot be
+edited by the thing that did it.
+
+**Sources: conversations and your own notes. Mail and calendar are deliberately excluded** —
+a decision, not an oversight.
+
+### 6.9 Calendar and tasks
 
 | Command | What it does |
 |---|---|
@@ -550,7 +610,7 @@ dialects are parsed (`📅 2026-08-20`, `[due:: 2026-08-20]`, `due 2026-08-20`, 
 Relative dates are deliberately **not** guessed — a wrong deadline silently reorders what
 you think is urgent.
 
-### 6.9 Voice
+### 6.10 Voice
 
 Everything here runs on this laptop. No audio is sent to MyAIServer or anywhere else.
 
@@ -560,7 +620,7 @@ Everything here runs on this laptop. No audio is sent to MyAIServer or anywhere 
 | `yoyo voice devices` | Lists microphones with their indices, for `mic.device` in `yoyo-voice.yaml`. Input devices only. |
 | `yoyo transcribe <file>` | Transcribes audio locally with faster-whisper. Writes a timestamped `.transcript.md` sidecar. `--model` to compare sizes, `--ingest` to put it straight into the corpus, `--language en` to stop it guessing on short clips. |
 | `yoyo say "text"` | Speaks text aloud. `--out file.wav` renders instead of playing. `--engine piper\|sapi`. |
-| `yoyo talk` | Push-to-talk conversation: ENTER to start, ENTER to stop, transcribed locally, answered through the normal path, spoken back. `--mode ask\|agent\|plan`, `--no-speak`, `--device N`. |
+| `yoyo talk` | Push-to-talk conversation: ENTER to start, ENTER to stop, transcribed locally, **routed per turn**, spoken back in a shape built for listening. `--mode auto\|ask\|agent\|plan` (default `auto`), `--full-text` to speak the written answer verbatim instead, `--no-speak`, `--device N`. Say "use plan mode" out loud to override a turn. |
 
 **Why local:** audio is the most sensitive input Yoyo will ever touch — it captures people
 who never agreed to be recorded by an assistant — and Yoyo's egress is unaudited (OQ5).
@@ -575,11 +635,24 @@ available. Only the transcribed *text* reaches the model.
 - **Whisper invents fluent sentences out of silence.** VAD filtering is on by default to
   trim non-speech before the model sees it. Leave it on.
 
+**A spoken answer is not the written one read aloud.** `yoyo talk` reshapes it first
+(`voice/speech.py`): citations are counted and announced ("two sources are on screen") rather
+than recited, code blocks are announced rather than spelled out, markdown structure becomes
+sentences, and anything past ~700 characters is cut at a sentence boundary with "the rest is
+on screen". Nothing is silently dropped, and the reshaping is **pure regex, never a second
+model call** — a "say this shorter" round trip would be a fresh chance to fabricate on text
+whose citations have already been removed, with nothing left to check it against. The written
+answer stays on screen, unchanged, and remains the source of truth. `--full-text` opts out.
+
+In `auto` mode the route is also **spoken** before the answer ("Looking that up."). With no
+screen to glance at, an unannounced routing decision is invisible, and an invisible decision
+is one you cannot override.
+
 TTS has two engines: **SAPI** is built into Windows, needs no download, and sounds like a
 satnav; **Piper** is a small neural voice that sounds close to natural and needs one `.onnx`
 file. SAPI is the default so `yoyo say` is never dead on arrival.
 
-### 6.10 Backup and restore
+### 6.11 Backup and restore
 
 | Command | What it does |
 |---|---|
@@ -590,7 +663,7 @@ file. SAPI is the default so `yoyo say` is never dead on arrival.
 **An unverified backup is a guess.** `yoyo backup` prints the drill command for this reason.
 Current status: 11/11 checks passing against the real USB drive (`F:\yoyo-backups`).
 
-### 6.11 Latencies to expect
+### 6.12 Latencies to expect
 
 Measured on this hardware, current model assignments.
 
@@ -687,15 +760,15 @@ Breaking these is a bug, not a style choice.
 ## 10. Tests
 
 ```powershell
-pytest -q          # 632 passing
+pytest -q          # 718 passing
 ruff check src tests
 ```
 
 | Area | Tests | Covers |
 |---|---|---|
-| Doctor / CLI | 70 | every one of the 36 commands renders its help; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
+| Doctor / CLI | 76 | every one of the 36 commands renders its help; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
 | Tasks | 50 | every checkbox flavour, four due-date dialects, completion-date-is-not-a-due-date, drafts excluded, **structural proof nothing can tick a box** |
-| Eval harness | 40 | fidelity gate catches a fabricating model, retry gate fails give-up-after-one-error, abstention both directions, `--role` override reaches every runner |
+| Eval harness | 47 | fidelity gate catches a fabricating model, retry gate fails give-up-after-one-error, abstention both directions, `--role` override reaches every runner, **memory extraction gated on verbatim quotes and on abstaining from a source with no facts** |
 | Calendar | 39 | ISO offsets incl. Graph's 7-digit fractions, local day bounds, conflict maths (back-to-back is not a clash), declined/cancelled exclusion, **structural proof of no write path and read-only scopes** |
 | Voice | 36 | timestamp formatting, speakable-text stripping, config validation, PowerShell quoting, **structural proof no voice module imports a network client** |
 | Agent / tools | 50 | arg validation, errors surfaced not raised, iteration + wall-clock budgets, forced answer on exhaustion, duplicate short-circuit, **untried-source hint**, **fabricated-path stripping** |
@@ -709,12 +782,15 @@ ruff check src tests
 | Graph | 15 | plan/dispatch/synthesise, subtask cap never silently truncates, worker gets the full question, planner splits on source difference not cost |
 | Bench | 13 | distinct prompts, `NO MEASUREMENT` when every request fails, 429s not read as serialisation |
 | Backup | 13 | archive contents, `.env` exclusion, drill fails on corruption and count mismatch |
-| HTTP API + UI | 48 | `/ask/stream` end to end against a mocked model, RAG context reaches the prompt, empty question rejected, **no write route exists** |
+| HTTP API + UI | 53 | `/ask/stream` end to end against a mocked model, RAG context reaches the prompt, empty question rejected, **no write route exists** |
 | Tool fidelity | 9 | the guard raises rather than warns; the shipped yaml has no tool role on a fabricating endpoint |
 | Storage | 8 | migrations, hash skip, chunk rebuild, FTS, ordering |
 | Chunking | 8 | boundaries, coverage, ordinals, size bounds |
 | Citations | 17 | scrubber keeps real identifiers, replaces invented paths visibly, gate and scrubber share one regex |
+| Memory (wiki) | 33 | **the laundering path is closed** — no claim may cite a wiki page; verbatim quotes; contradictions flagged not resolved; owner prose untouched |
 | Memory (raw sources) | 15 | verbatim transcripts, speaker labels, trivial turns skipped, **structural proof the raw layer never calls a model** |
+| Intent router | 22 | **uncertainty escalates, never downgrades** — the classifier cannot route below the deterministic floor; overrides call no model; a dead classifier degrades to rules, not to an exception |
+| Spoken answers (speech) | 13 | citations counted not recited, code announced not spelled out, truncation says so, **structural proof shaping only deletes and never invents words** |
 | Retrieval | 6 | RRF ranking, context budget, citations |
 
 **Not covered — assume broken until exercised:** every mail and calendar **network** path
@@ -755,6 +831,7 @@ verification is `yoyo doctor`, `yoyo eval` and `yoyo bench`, and those need the 
 | ADR-027 | qwen3-coder-next promoted to the tool-using roles |
 | ADR-028 | Voice runs locally on the laptop; calendar is read-only and shares mail's OAuth app |
 | ADR-029 | Web search through self-hosted SearXNG; egress logged, not blocked |
+| ADR-030 | Intent routing that can only over-serve; spoken answers get their own shape |
 
 Authoritative log: the Claude project docs `yoyo-architecture-decisions-2026-08-14.md` and
 `yoyo-open-questions-ledger.md`. **`docs/adr/` now mirrors all eight** so a clone explains
@@ -828,3 +905,7 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-15 | Calendar account and MCP server enabled, sharing mail's OAuth client. `YOYO_CALENDAR_CONFIG` added so the server's "no accounts configured" test points at a temp file — reading the shipped config made it pass or fail by whether the developer happened to have a calendar set up, which is no check on behaviour. It broke the moment a real account was enabled, which is how the flaw showed. |
 | 2026-08-15 | **Second-brain roadmap agreed** (project doc `yoyo-second-brain-roadmap.md`), adopting Karpathy's three-layer wiki pattern: raw sources → LLM-written wiki → governing schema. The owner chose auto-write over a review queue, and that is defensible *because of the pattern's own rule* — **a claim must trace to a raw source and never to another wiki page**, so a fabrication cannot compound. Sources: conversations and the owner's own notes. Mail and calendar deliberately excluded for now. |
 | 2026-08-15 | **Memory Phase 1** — `yoyo remember` makes past conversations searchable as verbatim corpus documents, speaker-labelled and timestamped. Deliberately dumb: a structural test asserts the raw-source layer never calls a model, because everything the wiki layer writes later must quote text no model generated. Also `ingest_text()`, so non-file sources reuse the whole existing chunk/embed/cite pipeline rather than growing a second retrieval path. |
+| 2026-08-15 | **Memory Phases 2–4.** Wiki layer with two mechanical gates — verbatim quote, and no claim may cite another wiki page. Extraction is the single place memory calls a model, and the source is set by the caller so a model can never name its own evidence. Identity ambiguity is asked, never guessed. Contradictions are recorded as edges, not resolved. `SCHEMA.md` regenerated into the vault so the rules are readable where the memory lives. |
+| 2026-08-15 | **Memory Phase 5 — routing and spoken answers.** `yoyo do` / `yoyo talk --mode auto` pick the mode. The design constraint: the mode choice was doing safety work, so routing may only over-serve. A deterministic pass computes a floor and the classifier is clamped to it — it can escalate, never downgrade — and a classifier that is down degrades to the rules rather than failing the turn. Every choice is printed with its reason, `--mode` overrides, and the UI offers one-click redo in another mode. Speech gets its own shape (`voice/speech.py`), regex-only so it can delete but never invent. |
+| 2026-08-15 | **Memory extraction gated** (`yoyo eval --only extraction`). Three cases against the real verifier: quotes must verify verbatim, a source with no durable facts must yield zero claims, and an inference trap ("Sarah called about the review") where the only honest answer is nothing. Recall is deliberately the softest of the three — a model that extracts everything scores perfectly on recall and is unusable. |
+| 2026-08-15 | Caught while building: my first contradiction design struck through the older claim, which needed a string heuristic to decide two claims were "the same fact" — and one crude enough to catch *lives in Toronto/Lisbon* also catches *is my sister/is moving in March*, silently striking a true fact. Replaced with flagging, per the pattern's own rule. Also: `SCHEMA.md` was being read back as an entity called "schema"; a page must now declare `about:` to count as one. |

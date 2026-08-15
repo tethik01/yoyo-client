@@ -674,3 +674,67 @@ def test_the_map_is_drawn_without_a_charting_library():
     assert "drawGraph" in html
     for lib in ("d3.", "cytoscape", "vis-network", "chart.js"):
         assert lib not in html.lower()
+
+
+# ------------------------------------------------------- routing over HTTP ---
+
+
+def test_route_endpoint_reports_the_decision_without_answering(client, monkeypatch):
+    """A misrouted answer and a bad answer look identical from outside. This is the seam
+    that tells them apart, so it must not run the turn it describes."""
+    monkeypatch.setattr(
+        "yoyo.api.core.ask", lambda *a, **k: pytest.fail("/route must not answer")
+    )
+    body = client.post("/route", json={"question": "check my unread mail",
+                                       "rules_only": True}).json()
+    assert body["mode"] == "agent"
+    assert body["reason"]
+    assert body["floor"] == "agent"
+
+
+def test_route_endpoint_rejects_an_empty_question(client):
+    assert client.post("/route", json={"question": " "}).status_code == 422
+
+
+def test_auto_mode_emits_the_choice_before_the_answer(client, monkeypatch):
+    """The browser cannot offer an override for a decision it was never told about, so the
+    route event must arrive as its own event — not folded into the answer."""
+    from yoyo import router
+
+    monkeypatch.setattr(router, "route", lambda q, **k: router.Route(
+        mode="ask", reason="one source", decided_by="rules", floor="ask", question=q))
+    monkeypatch.setattr(
+        "yoyo.api.core.ask",
+        lambda q, **k: type("A", (), {"text": "answered", "model": "m", "latency_ms": 1,
+                                      "passages": []})(),
+    )
+    body = client.post("/agent/stream", json={"question": "what do my notes say",
+                                              "mode": "auto"}).text
+    assert "event: route" in body
+    assert body.index("event: route") < body.index("event: answer")
+    assert '"mode": "ask"' in body
+
+
+def test_auto_mode_runs_the_stripped_question_not_the_raw_one(client, monkeypatch):
+    """`agent: any unread mail` must reach the model as `any unread mail`. Leaving the
+    instruction in makes the model answer questions about modes."""
+    from yoyo import router
+
+    real = router.route
+    monkeypatch.setattr(router, "route", lambda q, **k: real(q, use_model=False))
+    seen: dict = {}
+
+    def fake_agent(question, **kwargs):
+        seen["question"] = question
+        return type("R", (), {"text": "ok", "model": "m", "latency_ms": 1, "iterations": 1,
+                              "invocations": [], "tools_called": [], "fabricated_links": [],
+                              "stopped_because": "completed"})()
+
+    monkeypatch.setattr("yoyo.agent.run", fake_agent)
+    client.post("/agent/stream", json={"question": "agent: any unread mail", "mode": "auto"})
+    assert seen["question"] == "any unread mail"
+
+
+def test_an_unknown_mode_is_still_rejected(client):
+    r = client.post("/agent/stream", json={"question": "hi", "mode": "turbo"})
+    assert r.status_code == 422

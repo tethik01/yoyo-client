@@ -46,7 +46,10 @@ def test_shipped_eval_file_loads_and_every_kind_is_known():
     assert cases
     for c in cases:
         assert c["kind"] in evals.RUNNERS
-        assert c["id"] and c["prompt"]
+        # Every case needs an id and something to run on. Extraction cases carry a raw
+        # `source` rather than a `prompt` — they exercise the memory extractor, which is
+        # handed a document, not a question.
+        assert c["id"] and (c.get("prompt") or c.get("source"))
 
 
 def test_shipped_set_covers_both_tool_gates():
@@ -442,3 +445,91 @@ def test_unknown_role_prints_one_line_not_a_traceback(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "No role 'a_role_that_was_renamed'" in out
     assert "Known:" in out and "supervisor" in out
+
+
+# ---------------------------------------------------- memory extraction gate ---
+
+
+def _extraction_case(**over):
+    case = {
+        "id": "x", "kind": "extraction", "role": "extract",
+        "source_id": "conversation://x",
+        "source": "My sister Priya is flying to Lisbon on the 14th.",
+    }
+    case.update(over)
+    return case
+
+
+def _claims(monkeypatch, items):
+    from yoyo.memory.wiki import Claim
+
+    monkeypatch.setattr(
+        "yoyo.memory.extract.from_source",
+        lambda source_id, text, role="extract": [
+            Claim(source=source_id, **item) for item in items
+        ],
+    )
+
+
+def test_extraction_gate_passes_when_every_quote_is_in_the_source(monkeypatch):
+    _claims(monkeypatch, [{"subject": "Priya", "kind": "person",
+                           "claim": "Priya is flying to Lisbon",
+                           "quote": "Priya is flying to Lisbon"}])
+    result = evals.RUNNERS["extraction"](_extraction_case(must_find=["Priya"]))
+    assert result.passed
+
+
+def test_a_single_unverifiable_quote_fails_the_case(monkeypatch):
+    """Pass/fail, not a percentage. One fabricated quote in memory is the failure the whole
+    wiki layer exists to prevent — averaging it away would defeat the point."""
+    _claims(monkeypatch, [
+        {"subject": "Priya", "kind": "person", "claim": "flying to Lisbon",
+         "quote": "Priya is flying to Lisbon"},
+        {"subject": "Priya", "kind": "person", "claim": "works at Northwind",
+         "quote": "Priya works at Northwind Logistics"},   # not in the source
+    ])
+    result = evals.RUNNERS["extraction"](_extraction_case())
+    assert not result.passed
+    assert "unverifiable" in result.detail
+
+
+def test_the_abstain_gate_fails_a_model_that_invents_from_nothing(monkeypatch):
+    _claims(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "exists",
+                           "quote": "Priya"}])
+    case = _extraction_case(expect_empty=True, source="Can you re-run that? Priya")
+    assert not evals.RUNNERS["extraction"](case).passed
+
+
+def test_the_abstain_gate_passes_on_zero_claims(monkeypatch):
+    _claims(monkeypatch, [])
+    case = _extraction_case(expect_empty=True, source="Can you re-run that command?")
+    result = evals.RUNNERS["extraction"](case)
+    assert result.passed
+    assert "abstain" in result.detail
+
+
+def test_recall_is_the_softest_gate_and_reports_what_was_missed(monkeypatch):
+    _claims(monkeypatch, [{"subject": "Lisbon", "kind": "place", "claim": "a destination",
+                           "quote": "Lisbon"}])
+    result = evals.RUNNERS["extraction"](_extraction_case(must_find=["Priya"]))
+    assert not result.passed
+    assert "Priya" in result.detail
+
+
+def test_an_extractor_that_raises_fails_the_case_rather_than_the_run(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("endpoint down")
+
+    monkeypatch.setattr("yoyo.memory.extract.from_source", boom)
+    result = evals.RUNNERS["extraction"](_extraction_case())
+    assert not result.passed
+    assert "raised" in result.detail
+
+
+def test_the_shipped_set_gates_extraction_in_both_directions():
+    """Recall alone is not a gate: a model that extracts everything scores perfectly and is
+    unusable. The set must test abstention too."""
+    cases = [c for c in evals.load_cases() if c["kind"] == "extraction"]
+    assert cases
+    assert any(c.get("expect_empty") for c in cases)
+    assert any(c.get("must_find") for c in cases)

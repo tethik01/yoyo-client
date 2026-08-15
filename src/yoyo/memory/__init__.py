@@ -5,15 +5,18 @@ Three layers, following the wiki pattern the owner chose (Karpathy's gist):
     raw sources (immutable)  ->  the wiki (LLM-written)  ->  the schema (governance)
 
 - `sources` — Phase 1. Conversations and notes as verbatim, retrievable raw sources.
-  Nothing here interprets anything.
-- the wiki — Phase 2+. Entity and concept pages written automatically, where **every claim
-  must trace to a raw source and never to another wiki page.** That single rule is what
-  makes automatic writing defensible: a fabrication cannot compound, because nothing may
-  cite a page that a model wrote.
+  Never calls a model.
+- `extract` — the ONLY place memory calls a model. Proposes claims; decides nothing.
+- `wiki`   — verification and rendering. Enforces the rule the whole design rests on:
+  **a claim traces to a raw source, never to another wiki page.** Without it, automatic
+  writing poisons its own well; with it, a fabrication cannot compound.
+- `build`  — extraction + verification + identity + time. Contradictions supersede rather
+  than overwrite; genuine ambiguity is asked, not guessed.
 
-The owner's notes are raw sources. Yoyo never edits them.
+The owner's notes are raw sources. Yoyo never edits them — except inside a marked block in a
+note about an entity the owner already keeps, which was their explicit choice.
 """
 
-from . import sources
+from . import build, extract, schema, sources, wiki
 
-__all__ = ["sources"]
+__all__ = ["build", "extract", "schema", "sources", "wiki"]

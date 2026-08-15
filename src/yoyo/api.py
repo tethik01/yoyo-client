@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import core, doctor
+from . import core, doctor, router
 from .config import get_settings
 from .mcp import client as mcp_client
 from .rag import retrieve as rag
@@ -174,7 +174,7 @@ def _passage_out(p: rag.Passage) -> PassageOut:
 
 class AgentRequest(BaseModel):
     question: str = Field(min_length=1)
-    mode: str = "agent"          # ask | agent | plan
+    mode: str = "auto"           # auto | ask | agent | plan
     role: str | None = None
     max_iterations: int = 8
     conversation_id: int | None = None
@@ -203,6 +203,24 @@ def remove_conversation(conversation_id: int) -> dict[str, object]:
     return {"deleted": conversation_id}
 
 
+class RouteRequest(BaseModel):
+    question: str = Field(min_length=1)
+    rules_only: bool = False
+
+
+@app.post("/route")
+def route_question(req: RouteRequest) -> dict[str, object]:
+    """How a question would be routed, without answering it.
+
+    Separate from `/agent/stream` on purpose: a misrouted answer and a bad answer look
+    identical from the outside, and this is the only way to tell them apart.
+    """
+    try:
+        return router.route(req.question, use_model=not req.rules_only).as_dict()
+    except router.RouteError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
@@ -225,8 +243,8 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
 
     from . import agent as agent_mod
 
-    if req.mode not in {"ask", "agent", "plan"}:
-        raise HTTPException(422, "mode must be ask, agent or plan")
+    if req.mode not in {"auto", "ask", "agent", "plan"}:
+        raise HTTPException(422, "mode must be auto, ask, agent or plan")
 
     events: queue.Queue = queue.Queue()
 
@@ -236,9 +254,19 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
 
     def work() -> None:
         try:
-            if req.mode == "ask":
+            # `auto` routes here rather than before the thread starts: classification is a
+            # model call, and blocking the SSE handshake on it makes the UI look hung on
+            # every question. The choice is emitted as its own event the moment it is made,
+            # so the browser can show — and offer to override — what was picked.
+            mode, question = req.mode, req.question
+            if mode == "auto":
+                decision = router.route(req.question)
+                mode, question = decision.mode, decision.question
+                events.put(("route", decision.as_dict()))
+
+            if mode == "ask":
                 answer = core.ask(
-                    req.question, role=req.role or "answer",
+                    question, role=req.role or "answer",
                     conversation_id=conversation_id,
                 )
                 for p in answer.passages:
@@ -246,15 +274,15 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
                                            "path": p.source_path}))
                 events.put(("answer", {"text": answer.text, "model": answer.model,
                                        "latency_ms": answer.latency_ms}))
-            elif req.mode == "agent":
+            elif mode == "agent":
                 result = agent_mod.run(
-                    req.question,
+                    question,
                     role=req.role or "supervisor",
                     max_iterations=req.max_iterations,
                     history=prior,
                 )
                 core.persist_turn(
-                    conversation_id, req.question, result.text,
+                    conversation_id, question, result.text,
                     model=result.model, role=req.role or "supervisor",
                     latency_ms=result.latency_ms,
                     metadata={"mode": "agent", "tools": result.tools_called,
@@ -274,9 +302,9 @@ def agent_stream(req: AgentRequest) -> StreamingResponse:
             else:
                 from .graph import run as graph_run
 
-                result = graph_run(req.question)
+                result = graph_run(question)
                 core.persist_turn(
-                    conversation_id, req.question, result.answer,
+                    conversation_id, question, result.answer,
                     model="graph", latency_ms=result.latency_ms,
                     metadata={"mode": "plan", "subtasks": result.subtask_count},
                 )

@@ -51,6 +51,27 @@ empty and said how it checked. Slower and more honest.
 
 Rule of thumb: **one thing → `agent`. Several things, or several sources → `plan`.**
 
+### Or don't pick — `yoyo do`
+
+```powershell
+yoyo do "any unread mail from Priya about the invoice"
+yoyo route "what's on my calendar tomorrow and does my mail conflict"   # shows the choice, answers nothing
+```
+
+Yoyo picks the mode, **prints what it picked and why**, then answers. In the UI the mode
+dropdown has `auto`, and each answer carries a chip showing the choice with one-click
+"redo as ask / agent / plan".
+
+The one thing worth knowing about how it picks: **when unsure it goes up, never down.** A
+question mentioning your mail can never be routed to `ask`, no matter how confident the
+classifier is, because `ask` has no tools and will answer anyway. Over-serving costs you
+seconds; under-serving costs you a confident wrong answer with nothing to check it against.
+
+Override any time: `--mode agent`, or just say it in the question — `plan: compare the two
+endpoints` and "use ask mode" both work, spoken or typed. `--rules-only` skips the
+classifier entirely if you want the deterministic answer.
+
+
 ---
 
 ## 3. Where your stuff lives — vault vs corpus
@@ -201,6 +222,14 @@ yoyo talk                               # ENTER to start, ENTER to stop
 The whisper model size is a real choice, not a default to accept: `small` mangles proper
 nouns, which is most of what your corpus is made of ("Qdrant" → "quadrant"). Compare
 `--model base|small|medium` on your own audio and judge on names, not speed.
+
+**`yoyo talk` routes each turn and speaks a different answer from the one on screen.** You
+hear "Looking that up.", then the answer with citations *counted* rather than read out
+("two sources are on screen"), code announced rather than spelled out, and anything long cut
+at a sentence with "the rest is on screen". The full written answer is always on screen and
+is the source of truth — voice is a view onto it. `--full-text` speaks it verbatim if you
+would rather hear every `[12]`. To override a turn's mode, just say it: "use plan mode, …".
+
 
 ---
 

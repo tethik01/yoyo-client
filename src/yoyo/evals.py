@@ -300,7 +300,61 @@ def _run_no_tools_case(case: dict[str, Any]) -> CaseResult:
     )
 
 
+def _run_extraction_case(case: dict[str, Any]) -> CaseResult:
+    """Memory extraction, gated the same way everything else here is gated.
+
+    The roadmap's line was "do not skip the eval set", and this is why: extraction is the
+    one place memory calls a model, and its failures are the ones that compound. A wrong
+    claim written today is a retrievable source tomorrow and indistinguishable from
+    something the owner said by next week.
+
+    Three gates, in increasing order of how much they should worry you:
+
+    1. **Every quote verifies.** Run the real `wiki.verify` against the real source text. A
+       claim whose quote is not in the source is a fabrication the extraction prompt was
+       supposed to make impossible, and one is a hard fail — not a percentage.
+    2. **Abstention.** A source with no durable facts must yield zero claims. A model that
+       manufactures a fact from "thanks, that worked" will manufacture facts from anything.
+    3. **Recall**, last and softest. `must_find` names subjects that should be present. This
+       is the only one where being wrong is merely disappointing.
+    """
+    from .memory import extract as extract_mod
+    from .memory import wiki
+
+    source_id = case.get("source_id") or f"conversation://{case['id']}"
+    text = case.get("source", "")
+    role = _role_for(case, "extract")
+
+    try:
+        claims = extract_mod.from_source(source_id, text, role=role)
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(case["id"], case["kind"], False, f"raised: {exc}")
+
+    verification = wiki.verify(claims, {source_id: text})
+    if verification.rejected:
+        reasons = "; ".join(f"{c.subject}: {why}" for c, why in verification.rejected[:3])
+        return CaseResult(case["id"], case["kind"], False,
+                          f"{len(verification.rejected)} unverifiable claim(s) — {reasons}")
+
+    if case.get("expect_empty"):
+        return CaseResult(
+            case["id"], case["kind"], passed=not claims,
+            detail="ok — abstained" if not claims
+                   else f"invented {len(claims)} claim(s) from a source with no facts: "
+                        f"{[c.claim for c in claims][:3]}",
+        )
+
+    subjects = {c.subject.lower() for c in claims}
+    missing = [s for s in case.get("must_find", []) if s.lower() not in subjects]
+    return CaseResult(
+        case["id"], case["kind"], passed=not missing,
+        detail=f"{len(claims)} claim(s), all quotes verified"
+               if not missing else f"missing subject(s): {missing}",
+    )
+
+
 RUNNERS = {
+    "extraction": _run_extraction_case,
     "tool_fidelity": lambda c: _run_tool_case(c, fail_first=False),
     "tool_retry": lambda c: _run_tool_case(c, fail_first=True),
     "grounded": _run_grounded_case,
