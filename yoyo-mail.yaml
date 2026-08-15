@@ -16,7 +16,7 @@ accounts:
   personal:
     provider: gmail
     client_secrets: secrets/gmail-personal.json
-    enabled: false
+    enabled: true          # authenticated 2026-08-15 as bhavin0087@gmail.com
     description: Personal Gmail
 
   # --- Microsoft 365 ---------------------------------------------------------

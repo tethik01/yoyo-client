@@ -22,9 +22,8 @@ _bootstrap.tar.gz
 secrets/*
 !secrets/README.md
 data/mail-tokens/
-
-# scratch vault used to exercise the MCP server
-test-vault/
-
-# transfer scratch
-_to_delete/
+data/calendar-tokens/
+# Whisper/Piper weights — hundreds of MB, re-downloadable, never in git.
+data/voice-models/
+# Transcript sidecars sit beside their audio, which may live anywhere.
+*.transcript.md

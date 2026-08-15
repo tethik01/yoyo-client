@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<!--
+  Yoyo — local web UI.
+
+  One self-contained file, served by api.py. No build step, no npm, no CDN: the whole point
+  of this project is that it runs on hardware the owner controls, and a UI that phones out
+  to unpkg for a framework would quietly break that on the first offline day.
+
+  What this shows that the CLI cannot: tool calls as they arrive, citations you can click to
+  resolve, and a warning when the fabricated-citation scrubber had to act. Everything else
+  is a nicer place to type a question.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Yoyo</title>
+<style>
+  :root {
+    --bg: #12131a; --panel: #191b24; --line: #272a37; --ink: #e6e8ef;
+    --dim: #8b90a3; --accent: #7aa2f7; --ok: #9ece6a; --warn: #e0af68; --bad: #f7768e;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f7f8fa; --panel:#fff; --line:#e2e5ec; --ink:#1a1c23; --dim:#666c7e;
+            --accent:#2f6fd0; --ok:#3f8f3f; --warn:#9a6b00; --bad:#c33; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 system-ui, sans-serif; }
+  header { display:flex; align-items:center; gap:12px; padding:10px 18px;
+           border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+  header h1 { font-size:16px; margin:0; letter-spacing:.02em; }
+  header .sub { color:var(--dim); font-size:12px; }
+  #health { margin-left:auto; font-size:12px; color:var(--dim); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--dim); margin-right:5px; }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  .shell { display:grid; grid-template-columns:240px 1fr; gap:0; min-height:calc(100vh - 44px); }
+  aside { border-right:1px solid var(--line); background:var(--panel); padding:12px 10px;
+          position:sticky; top:44px; height:calc(100vh - 44px); overflow:auto; }
+  aside h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+             margin:6px 6px 8px; }
+  .conv { padding:8px 10px; border-radius:7px; cursor:pointer; font-size:13px;
+          color:var(--ink); display:flex; gap:6px; align-items:baseline; }
+  .conv:hover { background:color-mix(in srgb, var(--accent) 12%, transparent); }
+  .conv.active { background:color-mix(in srgb, var(--accent) 20%, transparent); font-weight:600; }
+  .conv .when { margin-left:auto; font-size:11px; color:var(--dim); flex:none; }
+  .conv .label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .newconv { width:100%; margin-bottom:10px; background:transparent; color:var(--accent);
+             border:1px dashed var(--line); font-weight:600; }
+  @media (max-width: 720px) { .shell { grid-template-columns:1fr; } aside { display:none; } }
+  main { max-width:900px; margin:0 auto; padding:18px; width:100%; }
+  .turn { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+          margin-bottom:16px; overflow:hidden; }
+  .q { padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
+  .q .mode { font-weight:400; font-size:11px; color:var(--dim); text-transform:uppercase;
+             letter-spacing:.08em; margin-left:8px; }
+  .tools { padding:8px 16px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:12.5px; }
+  .tool { color:var(--dim); padding:2px 0; }
+  .tool b { color:var(--accent); font-weight:600; }
+  .tool.err b { color:var(--bad); }
+  .a { padding:14px 16px; white-space:pre-wrap; word-wrap:break-word; }
+  .meta { padding:8px 16px; border-top:1px solid var(--line); color:var(--dim);
+          font-size:12px; font-family:var(--mono); }
+  .warn { padding:10px 16px; background:color-mix(in srgb, var(--warn) 14%, transparent);
+          border-top:1px solid var(--line); color:var(--warn); font-size:13px; }
+  cite { font-style:normal; color:var(--accent); cursor:pointer; border-bottom:1px dotted var(--accent); }
+  cite:hover { background:color-mix(in srgb, var(--accent) 15%, transparent); }
+  form { display:flex; gap:8px; position:sticky; bottom:0; background:var(--bg);
+         padding:14px 0 20px; }
+  input[type=text] { flex:1; padding:11px 14px; border-radius:8px; border:1px solid var(--line);
+                     background:var(--panel); color:var(--ink); font:inherit; }
+  select, button { padding:11px 14px; border-radius:8px; border:1px solid var(--line);
+                   background:var(--panel); color:var(--ink); font:inherit; cursor:pointer; }
+  button { background:var(--accent); color:#fff; border-color:transparent; font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  dialog { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+           color:var(--ink); max-width:760px; width:92vw; padding:0; }
+  dialog::backdrop { background:rgba(0,0,0,.55); }
+  dialog h3 { margin:0; padding:12px 16px; border-bottom:1px solid var(--line); font-size:14px; }
+  dialog .body { padding:14px 16px; max-height:60vh; overflow:auto; white-space:pre-wrap;
+                 font-family:var(--mono); font-size:12.5px; }
+  dialog footer { padding:10px 16px; border-top:1px solid var(--line); text-align:right; }
+  .hint { color:var(--dim); font-size:13px; padding:6px 2px 14px; }
+  .tabs { display:flex; gap:4px; margin-bottom:12px; }
+  .tab { padding:6px 12px; border-radius:7px; border:1px solid var(--line); background:var(--panel);
+         color:var(--dim); cursor:pointer; font-size:13px; }
+  .tab.on { color:var(--ink); border-color:var(--accent); font-weight:600; }
+  #mapWrap { border:1px solid var(--line); border-radius:10px; background:var(--panel); }
+  #mapStats { padding:10px 14px; border-bottom:1px solid var(--line); font-size:12.5px;
+              color:var(--dim); font-family:var(--mono); }
+  #map { width:100%; height:min(66vh, 560px); display:block; cursor:grab; }
+  .legend { padding:10px 14px; border-top:1px solid var(--line); font-size:12px; color:var(--dim);
+            display:flex; gap:16px; flex-wrap:wrap; }
+  .legend i { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Yoyo</h1>
+  <span class="sub">local assistant · inference on MyAIServer</span>
+  <span id="health"><span class="dot"></span>checking…</span>
+</header>
+
+<div class="shell">
+<aside>
+  <button class="newconv" id="new">+ New conversation</button>
+  <h2>History</h2>
+  <div id="convs"></div>
+</aside>
+
+<main>
+  <div class="hint">
+    Answers cite their sources. <b>Click any citation to read the original</b> — a citation
+    you cannot follow is decoration.
+  </div>
+  <div class="tabs">
+    <button class="tab on" data-view="chat">Chat</button>
+    <button class="tab" data-view="map">Vault map</button>
+  </div>
+
+  <div id="turns"></div>
+
+  <div id="mapWrap" hidden>
+    <div id="mapStats">loading…</div>
+    <svg id="map"></svg>
+    <div class="legend">
+      <span><i style="background:var(--accent)"></i>note, in corpus</span>
+      <span><i style="background:var(--dim)"></i>note, not ingested</span>
+      <span><i style="background:var(--warn)"></i>empty</span>
+      <span><i style="background:transparent;border:1px dashed var(--bad)"></i>linked but missing</span>
+    </div>
+  </div>
+
+  <form id="ask">
+    <input type="text" id="q" placeholder="Ask something…" autocomplete="off" autofocus>
+    <select id="mode" title="ask: one retrieval · agent: tools · plan: parallel workers">
+      <option value="agent">agent</option>
+      <option value="ask">ask</option>
+      <option value="plan">plan</option>
+    </select>
+    <button type="submit" id="go">Send</button>
+  </form>
+</main>
+</div>
+
+<dialog id="src"><h3 id="srcTitle"></h3><div class="body" id="srcBody"></div>
+  <footer><button onclick="document.getElementById('src').close()">Close</button></footer></dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// The whole point of this feature: without it, a refresh lost everything and a follow-up
+// question ("and what about tomorrow?") reached the model with no idea what "tomorrow"
+// referred to. The SQLite tables existed from day one; the UI simply never passed an id.
+let conversationId = null;
+const esc = (s) => (s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// Citations come in three vocabularies — [12] corpus chunks, [mail:<id>] messages,
+// [Note.md] vault notes. One pattern, because the user should not have to know which is
+// which to click it.
+// The negative lookahead matters: `[Label](url)` is a markdown link, not a citation, and
+// turning its label into a clickable chip sent the user to a 404 resolver. Seen live on an
+// answer whose links the model had invented outright.
+const CITE = /\[((?:mail:)?[A-Za-z0-9][^\]\s][^\]]{0,120})\](?!\()/g;
+
+function linkify(text) {
+  return esc(text).replace(CITE, (m, id) =>
+    `<cite data-id="${esc(id)}" title="Click to read the source">[${esc(id)}]</cite>`);
+}
+
+async function health() {
+  try {
+    const r = await fetch("/health");
+    const j = await r.json();
+    const bad = (j.checks || []).filter(c => !c.ok);
+    // Tool count is shown because its absence caused a real confusion: `web_search` was
+    // configured and enabled, the API had simply never mounted it, and the only clue was
+    // an error message inside the model's answer.
+    const tools = (j.tools || []).length;
+    const failedMcp = Object.entries(j.mcp || {}).filter(([, ok]) => !ok).map(([n]) => n);
+    const bits = [`${tools} tools`];
+    if (failedMcp.length) bits.push(`mcp failed: ${failedMcp.join(", ")}`);
+    $("health").title = (j.tools || []).join(", ");
+    $("health").innerHTML = (bad.length || failedMcp.length)
+      ? `<span class="dot bad"></span>${bits.join(" · ")}${bad.length ? " · " + esc(bad.map(c=>c.name).join(", ")) : ""}`
+      : `<span class="dot ok"></span>${bits.join(" · ")} · all checks pass`;
+  } catch {
+    $("health").innerHTML = `<span class="dot bad"></span>API unreachable`;
+  }
+}
+
+document.addEventListener("click", async (e) => {
+  const cite = e.target.closest("cite");
+  if (!cite) return;
+  const id = cite.dataset.id;
+  $("srcTitle").textContent = id;
+  $("srcBody").textContent = "loading…";
+  $("src").showModal();
+  try {
+    const r = await fetch(`/citation/${encodeURIComponent(id)}`);
+    const j = await r.json();
+    if (!r.ok) { $("srcBody").textContent = j.detail || "not found"; return; }
+    if (j.kind === "mail") {
+      $("srcTitle").textContent = j.subject || id;
+      $("srcBody").textContent = `from ${j.from}\nto   ${(j.to||[]).join(", ")}\n${j.date}\n\n${j.body || j.snippet || ""}`;
+    } else if (j.kind === "chunk") {
+      $("srcTitle").textContent = `${j.title || "chunk"} — ${j.source_path}`;
+      $("srcBody").textContent = j.text;
+    } else {
+      $("srcTitle").textContent = j.path || id;
+      $("srcBody").textContent = j.text || "";
+    }
+  } catch (err) {
+    $("srcBody").textContent = String(err);
+  }
+});
+
+$("ask").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const question = $("q").value.trim();
+  if (!question) return;
+  const mode = $("mode").value;
+  $("q").value = ""; $("go").disabled = true;
+
+  const turn = document.createElement("div");
+  turn.className = "turn";
+  turn.innerHTML = `<div class="q">${esc(question)}<span class="mode">${mode}</span></div>
+                    <div class="tools" hidden></div>
+                    <div class="a"><span style="color:var(--dim)">thinking…</span></div>
+                    <div class="meta" hidden></div>`;
+  $("turns").append(turn);
+  turn.scrollIntoView({behavior:"smooth", block:"end"});
+
+  const tools = turn.querySelector(".tools");
+  const answer = turn.querySelector(".a");
+  const meta = turn.querySelector(".meta");
+
+  // Hand-rolled SSE parse rather than EventSource: EventSource cannot POST, and the
+  // question does not belong in a URL — putting private text in a query string is the
+  // habit this project spends its time avoiding.
+  try {
+    const res = await fetch("/agent/stream", {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify({question, mode, conversation_id: conversationId}),
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream:true});
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop();
+      for (const raw of chunks) {
+        const ev = (raw.match(/^event: (.+)$/m) || [])[1];
+        const dataLine = (raw.match(/^data: (.+)$/m) || [])[1];
+        if (!ev || !dataLine) continue;
+        const d = JSON.parse(dataLine);
+
+        if (ev === "start") {
+          // The server creates a conversation lazily on the first question, so the id is
+          // only known once the turn begins.
+          if (d.conversation_id) conversationId = d.conversation_id;
+        } else if (ev === "tool" || ev === "subtask") {
+          tools.hidden = false;
+          const row = document.createElement("div");
+          row.className = "tool" + (d.ok === false ? " err" : "");
+          const args = d.arguments && Object.keys(d.arguments).length
+            ? JSON.stringify(d.arguments) : "";
+          row.innerHTML = ev === "subtask"
+            ? `<b>${d.id}.</b> ${esc(d.goal)}`
+            : `<b>${esc(d.name)}</b> ${esc(args)}${d.error ? " — " + esc(d.error) : ""}`;
+          tools.append(row);
+        } else if (ev === "source") {
+          tools.hidden = false;
+          const row = document.createElement("div");
+          row.className = "tool";
+          row.innerHTML = `<b>retrieved</b> ${esc(d.citation)} ${esc(d.title || d.path || "")}`;
+          tools.append(row);
+        } else if (ev === "answer") {
+          answer.innerHTML = linkify(d.text || "(no answer)");
+          meta.hidden = false;
+          meta.textContent = [
+            d.model, d.latency_ms != null ? `${(d.latency_ms/1000).toFixed(1)}s` : null,
+            d.iterations != null ? `${d.iterations} iterations` : null, d.stopped_because,
+          ].filter(Boolean).join(" · ");
+          if (d.fabricated_links && d.fabricated_links.length) {
+            // Never swallowed. A turn that needed the scrubber is a turn whose model
+            // invented a citation, and the owner should know which ones did.
+            const w = document.createElement("div");
+            w.className = "warn";
+            w.textContent = `Removed ${d.fabricated_links.length} fabricated citation path(s): `
+                          + d.fabricated_links.join(", ");
+            turn.insertBefore(w, meta);
+          }
+        } else if (ev === "error") {
+          answer.innerHTML = `<span style="color:var(--bad)">${esc(d.message)}</span>`;
+        }
+      }
+    }
+  } catch (err) {
+    answer.innerHTML = `<span style="color:var(--bad)">${esc(String(err))}</span>`;
+  } finally {
+    $("go").disabled = false;
+    $("q").focus();
+    loadConversations();
+    turn.scrollIntoView({behavior:"smooth", block:"end"});
+  }
+});
+
+function when(iso) {
+  if (!iso) return "";
+  const then = new Date(iso.replace(" ", "T") + (iso.endsWith("Z") ? "" : "Z"));
+  const mins = Math.round((Date.now() - then.getTime()) / 60000);
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  if (mins < 1440) return `${Math.round(mins/60)}h`;
+  return `${Math.round(mins/1440)}d`;
+}
+
+async function loadConversations() {
+  try {
+    const list = await (await fetch("/conversations")).json();
+    $("convs").innerHTML = "";
+    for (const c of list) {
+      const row = document.createElement("div");
+      row.className = "conv" + (c.id === conversationId ? " active" : "");
+      row.innerHTML = `<span class="label">${esc(c.title || "(untitled)")}</span>`
+                    + `<span class="when">${when(c.updated_at)}</span>`;
+      row.onclick = () => openConversation(c.id);
+      $("convs").append(row);
+    }
+  } catch { /* the sidebar is not worth breaking the page over */ }
+}
+
+function renderTurn({question, mode, answer, meta, tools}) {
+  const turn = document.createElement("div");
+  turn.className = "turn";
+  turn.innerHTML = `<div class="q">${esc(question)}<span class="mode">${esc(mode||"")}</span></div>
+                    <div class="tools" ${tools && tools.length ? "" : "hidden"}></div>
+                    <div class="a">${answer === undefined ? '<span style="color:var(--dim)">thinking…</span>' : linkify(answer)}</div>
+                    <div class="meta" ${meta ? "" : "hidden"}>${esc(meta || "")}</div>`;
+  for (const t of tools || []) {
+    const row = document.createElement("div");
+    row.className = "tool";
+    row.innerHTML = `<b>${esc(t)}</b>`;
+    turn.querySelector(".tools").append(row);
+  }
+  $("turns").append(turn);
+  return turn;
+}
+
+async function openConversation(id) {
+  conversationId = id;
+  $("turns").innerHTML = "";
+  try {
+    const data = await (await fetch(`/conversations/${id}`)).json();
+    // Messages arrive oldest-first and alternate user/assistant. Pairing them here rather
+    // than storing turns keeps the schema as it is — one row per message, which is what
+    // history replay to the model needs.
+    const msgs = data.messages || [];
+    for (let i = 0; i < msgs.length; i++) {
+      if (msgs[i].role !== "user") continue;
+      const reply = msgs[i + 1] && msgs[i + 1].role === "assistant" ? msgs[i + 1] : null;
+      const md = (reply && reply.metadata) || {};
+      renderTurn({
+        question: msgs[i].content,
+        mode: md.mode || "",
+        answer: reply ? reply.content : "(no answer recorded)",
+        tools: md.tools || [],
+        meta: reply ? [reply.model, reply.latency_ms ? `${(reply.latency_ms/1000).toFixed(1)}s` : null]
+                        .filter(Boolean).join(" · ") : "",
+      });
+    }
+  } catch (err) {
+    $("turns").innerHTML = `<div class="hint">could not load conversation: ${esc(String(err))}</div>`;
+  }
+  loadConversations();
+  $("q").focus();
+}
+
+$("new").onclick = () => {
+  conversationId = null;
+  $("turns").innerHTML = "";
+  loadConversations();
+  $("q").focus();
+};
+
+// ---------------------------------------------------------------- vault map ---
+// Deliberately hand-rolled rather than d3: the no-CDN rule is not negotiable, and a force
+// layout for a personal vault is ~40 lines. Good enough beats a dependency here.
+let mapLoaded = false;
+
+function drawGraph(data) {
+  const svg = $("map");
+  const W = svg.clientWidth || 800, H = svg.clientHeight || 480;
+  const nodes = data.nodes.map((n, i) => ({
+    ...n,
+    // Seeded on a circle rather than at random: a deterministic start means the same vault
+    // draws the same way twice, which matters more than looking organic.
+    x: W/2 + Math.cos(i * 2.399) * Math.min(W, H) * 0.3,
+    y: H/2 + Math.sin(i * 2.399) * Math.min(W, H) * 0.3,
+    vx: 0, vy: 0,
+  }));
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const edges = data.edges.filter(e => byId[e.source] && byId[e.target]);
+
+  for (let step = 0; step < 260; step++) {
+    for (const a of nodes) {
+      for (const b of nodes) {
+        if (a === b) continue;
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const d2 = Math.max(dx*dx + dy*dy, 40);
+        const f = 1400 / d2;
+        a.vx += dx * f * 0.02; a.vy += dy * f * 0.02;
+      }
+      a.vx += (W/2 - a.x) * 0.004;      // gravity, or disconnected notes drift off-canvas
+      a.vy += (H/2 - a.y) * 0.004;
+    }
+    for (const e of edges) {
+      const a = byId[e.source], b = byId[e.target];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      a.vx += dx * 0.012; a.vy += dy * 0.012;
+      b.vx -= dx * 0.012; b.vy -= dy * 0.012;
+    }
+    for (const n of nodes) {
+      n.x = Math.max(24, Math.min(W - 24, n.x + (n.vx *= 0.82)));
+      n.y = Math.max(24, Math.min(H - 24, n.y + (n.vy *= 0.82)));
+    }
+  }
+
+  const colour = (n) => !n.exists ? "transparent"
+                      : n.empty ? "var(--warn)"
+                      : n.in_corpus ? "var(--accent)" : "var(--dim)";
+  const parts = [];
+  for (const e of edges) {
+    const a = byId[e.source], b = byId[e.target];
+    parts.push(`<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"
+                 stroke="var(--line)" stroke-width="1.4"/>`);
+  }
+  for (const n of nodes) {
+    const r = n.exists ? Math.min(18, 7 + Math.sqrt(n.bytes || 0) / 12) : 6;
+    parts.push(
+      `<circle cx="${n.x}" cy="${n.y}" r="${r}" fill="${colour(n)}"
+        stroke="${n.exists ? "none" : "var(--bad)"}" stroke-dasharray="3 2"
+        ${n.path ? `data-note="${esc(n.path)}" style="cursor:pointer"` : ""}>
+        <title>${esc(n.title)}${n.exists ? "" : " (linked but not written)"}${n.empty && n.exists ? " — empty" : ""}${n.in_corpus ? " — in corpus" : n.exists ? " — not ingested" : ""}</title>
+      </circle>`,
+      `<text x="${n.x}" y="${n.y + r + 12}" text-anchor="middle" font-size="11"
+        fill="var(--dim)" pointer-events="none">${esc(n.title.slice(0, 22))}</text>`);
+  }
+  svg.innerHTML = parts.join("");
+}
+
+async function loadMap() {
+  try {
+    const r = await fetch("/vault/graph");
+    const data = await r.json();
+    if (!r.ok) { $("mapStats").textContent = data.detail || "no vault configured"; return; }
+    const st = data.stats;
+    $("mapStats").innerHTML =
+      `${st.notes} notes · ${st.links} links · ${st.in_corpus} in corpus`
+      + (st.empty ? ` · <span style="color:var(--warn)">${st.empty} empty</span>` : "")
+      + (st.missing ? ` · <span style="color:var(--bad)">${st.missing} linked but not written</span>` : "")
+      + (st.notes && !st.links ? ` — <span style="color:var(--dim)">no [[wikilinks]] yet</span>` : "");
+    drawGraph(data);
+    mapLoaded = true;
+  } catch (err) {
+    $("mapStats").textContent = String(err);
+  }
+}
+
+$("map").addEventListener("click", (e) => {
+  const path = e.target.closest("circle")?.dataset?.note;
+  if (path) { $("srcTitle").textContent = path; $("srcBody").textContent = "loading…";
+              $("src").showModal();
+              fetch(`/citation/${encodeURIComponent(path)}`).then(r => r.json())
+                .then(j => { $("srcBody").textContent = j.text || j.detail || "(empty)"; }); }
+});
+
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.onclick = () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t === tab));
+    const map = tab.dataset.view === "map";
+    $("mapWrap").hidden = !map;
+    $("turns").hidden = map;
+    $("ask").hidden = map;
+    if (map && !mapLoaded) loadMap();
+  };
+}
+
+health();
+loadConversations();
+setInterval(health, 60000);
+</script>
+</body>
+</html>

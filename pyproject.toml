@@ -35,6 +35,15 @@ mail = [
     "google-auth-oauthlib>=1.2",
     "msal>=1.28",
 ]
+voice = [
+    # STT: CTranslate2 runtime, ~4x faster than openai-whisper on CPU with int8.
+    "faster-whisper>=1.0",
+    # Microphone capture. Needs PortAudio; the wheel bundles it on Windows.
+    "sounddevice>=0.4",
+    # TTS: optional. The Windows SAPI engine needs nothing at all, so voice works
+    # without this; install it only if you want the neural voice.
+    "piper-tts>=1.2 ; platform_system != 'Darwin'",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
@@ -50,6 +59,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/yoyo"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/yoyo/static" = "yoyo/static"
 
 [tool.ruff]
 line-length = 100

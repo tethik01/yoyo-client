@@ -43,7 +43,6 @@ EVAL_FILE = REPO_ROOT / "evals" / "golden.yaml"
 #: fabricated link even though the interactive path strips it — see citations.py.
 from .citations import FABRICATED_LINK, fabricated_links  # noqa: E402,F401
 
-
 ABSTAIN_MARKERS = [
     "not in the",
     "no information",

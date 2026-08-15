@@ -7,20 +7,49 @@ explicit, not accidental.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import core, doctor
 from .config import get_settings
+from .mcp import client as mcp_client
 from .rag import retrieve as rag
 from .storage import db
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="Yoyo", version="0.1.0")
+@contextlib.asynccontextmanager
+async def lifespan(_app: FastAPI):  # noqa: ANN202
+    """Mount MCP servers once, at startup.
+
+    The CLI calls `mount_all()` before every agent turn. The API did not, so tools reached
+    the model through the UI as the four built-ins only — and an agent asked to search the
+    web replied "unknown tool 'web_search'". The tools existed, were configured and were
+    enabled; nothing had told this process about them.
+
+    At startup rather than per request: each mount spawns a subprocess over stdio, and doing
+    that on every question would add seconds to each turn and leak processes.
+    """
+    report = mcp_client.mount_all()
+    for name, outcome in report.items():
+        if outcome["ok"]:
+            log.info("mounted MCP server %s", name)
+        else:
+            log.warning("MCP server %s failed to mount: %s", name, outcome["error"])
+    app.state.mcp = report
+    try:
+        yield
+    finally:
+        mcp_client.unmount_all()
+
+
+app = FastAPI(title="Yoyo", version="0.1.0", lifespan=lifespan)
 
 
 class AskRequest(BaseModel):
@@ -51,7 +80,16 @@ class AskResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, object]:
-    return doctor.summary()
+    from . import tools as tools_mod
+
+    summary = doctor.summary()
+    # Which tools the model can actually reach. This is the fact whose absence produced
+    # "unknown tool 'web_search'" against a correctly configured, enabled server.
+    summary["tools"] = sorted(tools_mod.registry.names())
+    summary["mcp"] = {
+        name: outcome["ok"] for name, outcome in getattr(app.state, "mcp", {}).items()
+    }
+    return summary
 
 
 @app.get("/stats")
@@ -103,12 +141,14 @@ def ask_stream(req: AskRequest) -> StreamingResponse:
     if req.conversation_id:
         messages.extend(core.history(req.conversation_id))
     messages.append(
-        {"role": "user", "content": f"{context}\n\n---\n\n{req.question}" if context else req.question}
+        {
+            "role": "user",
+            "content": f"{context}\n\n---\n\n{req.question}" if context else req.question,
+        }
     )
 
     def gen():
-        for piece in llm.stream_chat(messages, role=req.role):
-            yield piece
+        yield from llm.stream_chat(messages, role=req.role)
 
     return StreamingResponse(gen(), media_type="text/plain")
 
@@ -129,8 +169,235 @@ def _passage_out(p: rag.Passage) -> PassageOut:
     )
 
 
+# --------------------------------------------------------------------- agent ---
+
+
+class AgentRequest(BaseModel):
+    question: str = Field(min_length=1)
+    mode: str = "agent"          # ask | agent | plan
+    role: str | None = None
+    max_iterations: int = 8
+    conversation_id: int | None = None
+
+
+@app.get("/conversations")
+def list_conversations(limit: int = 50) -> list[dict[str, object]]:
+    return core.list_conversations(limit=limit)
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation(conversation_id: int) -> dict[str, object]:
+    messages = core.conversation_messages(conversation_id)
+    if not messages:
+        # An empty conversation and a missing one are different, but only the second is
+        # worth a 404 — a conversation created and abandoned should not read as an error.
+        known = {c["id"] for c in core.list_conversations(limit=500)}
+        if conversation_id not in known:
+            raise HTTPException(404, f"no conversation {conversation_id}")
+    return {"id": conversation_id, "messages": messages}
+
+
+@app.delete("/conversations/{conversation_id}")
+def remove_conversation(conversation_id: int) -> dict[str, object]:
+    core.delete_conversation(conversation_id)
+    return {"deleted": conversation_id}
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@app.post("/agent/stream")
+def agent_stream(req: AgentRequest) -> StreamingResponse:
+    """An agent turn as server-sent events: tool calls as they happen, then the answer.
+
+    The CLI already shows tool calls; nothing else could. That visibility is most of the
+    reason to have a UI at all — an answer you watch being assembled from named sources is
+    a different object from an answer that simply appears.
+
+    The agent loop is synchronous and returns everything at the end, so this runs it on a
+    thread and emits events from a queue. Not true token streaming for the agent path —
+    `/ask/stream` covers that — but the tool calls arrive live, which is the part with no
+    other way to see it.
+    """
+    import queue
+    import threading
+
+    from . import agent as agent_mod
+
+    if req.mode not in {"ask", "agent", "plan"}:
+        raise HTTPException(422, "mode must be ask, agent or plan")
+
+    events: queue.Queue = queue.Queue()
+
+    # Created lazily on the first question so an opened-and-abandoned tab leaves no rows.
+    conversation_id = req.conversation_id or core.new_conversation()
+    prior = core.history(conversation_id) if req.conversation_id else []
+
+    def work() -> None:
+        try:
+            if req.mode == "ask":
+                answer = core.ask(
+                    req.question, role=req.role or "answer",
+                    conversation_id=conversation_id,
+                )
+                for p in answer.passages:
+                    events.put(("source", {"citation": f"[{p.chunk_id}]", "title": p.title,
+                                           "path": p.source_path}))
+                events.put(("answer", {"text": answer.text, "model": answer.model,
+                                       "latency_ms": answer.latency_ms}))
+            elif req.mode == "agent":
+                result = agent_mod.run(
+                    req.question,
+                    role=req.role or "supervisor",
+                    max_iterations=req.max_iterations,
+                    history=prior,
+                )
+                core.persist_turn(
+                    conversation_id, req.question, result.text,
+                    model=result.model, role=req.role or "supervisor",
+                    latency_ms=result.latency_ms,
+                    metadata={"mode": "agent", "tools": result.tools_called,
+                              "fabricated_links": result.fabricated_links},
+                )
+                for inv in result.invocations:
+                    events.put(("tool", {"name": inv.name, "arguments": inv.arguments,
+                                         "ok": inv.ok, "error": inv.error}))
+                events.put(("answer", {
+                    "text": result.text, "model": result.model,
+                    "latency_ms": result.latency_ms, "iterations": result.iterations,
+                    "stopped_because": result.stopped_because,
+                    # Surfaced, never swallowed: a turn that needed the scrubber is a turn
+                    # whose model fabricated a citation.
+                    "fabricated_links": result.fabricated_links,
+                }))
+            else:
+                from .graph import run as graph_run
+
+                result = graph_run(req.question)
+                core.persist_turn(
+                    conversation_id, req.question, result.answer,
+                    model="graph", latency_ms=result.latency_ms,
+                    metadata={"mode": "plan", "subtasks": result.subtask_count},
+                )
+                if result.plan:
+                    for st in result.plan.subtasks:
+                        events.put(("subtask", {"id": st.id, "goal": st.goal}))
+                for r in result.results:
+                    events.put(("tool", {"name": f"subtask {r.subtask_id}", "arguments": {},
+                                         "ok": r.ok, "error": None}))
+                events.put(("answer", {"text": result.answer, "model": "graph",
+                                       "latency_ms": result.latency_ms,
+                                       "iterations": result.subtask_count,
+                                       "stopped_because": result.stopped_because,
+                                       "fabricated_links": []}))
+        except Exception as exc:  # noqa: BLE001 - the browser must hear about it
+            log.exception("agent stream failed")
+            events.put(("error", {"message": f"{type(exc).__name__}: {exc}"}))
+        finally:
+            events.put((None, None))
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def gen():
+        yield _sse("start", {"mode": req.mode, "question": req.question,
+                             "conversation_id": conversation_id})
+        while True:
+            kind, payload = events.get()
+            if kind is None:
+                break
+            yield _sse(kind, payload)
+        yield _sse("done", {})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/citation/{citation}")
+def resolve_citation(citation: str) -> dict[str, object]:
+    """Resolve a citation to its source. The whole point of citing.
+
+    Three vocabularies, one endpoint: `12` is a corpus chunk, `mail:<id>` is a message,
+    anything else is treated as a vault note path. A citation you cannot follow is
+    decoration, and until now following one meant a second terminal.
+    """
+    if citation.startswith("mail:"):
+        from . import mail as mail_mod
+
+        try:
+            message = mail_mod.resolve(None).read(citation.removeprefix("mail:"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(404, f"could not read {citation}: {exc}") from exc
+        return {"kind": "mail", **message.as_dict(include_body=True)}
+
+    if citation.strip("[]").isdigit():
+        from .storage import db as db_mod
+
+        with db_mod.connection() as conn:
+            row = conn.execute(
+                "SELECT c.id, c.text, c.ordinal, d.title, d.source_path "
+                "FROM chunks c JOIN documents d ON d.id = c.document_id WHERE c.id = ?",
+                (int(citation.strip("[]")),),
+            ).fetchone()
+        if not row:
+            raise HTTPException(404, f"no chunk {citation}")
+        return {"kind": "chunk", "chunk_id": row[0], "text": row[1], "ordinal": row[2],
+                "title": row[3], "source_path": row[4]}
+
+    from . import vault as vault_mod
+
+    try:
+        return {"kind": "note", **vault_mod.read_note(citation.strip("[]"))}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(404, f"could not resolve {citation}: {exc}") from exc
+
+
+@app.get("/vault/graph")
+def vault_graph(folder: str = "") -> dict[str, object]:
+    """Notes, their wikilinks, and which of them the corpus has ingested."""
+    from . import vault as vault_mod
+
+    try:
+        return vault_mod.graph(folder)
+    except vault_mod.VaultError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def ui() -> str:
+    """The single-page front end. Served from the package so there is nothing to build."""
+    return (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/", response_class=HTMLResponse)
+def root() -> str:
+    return ui()
+
+
+def port_is_free(host: str, port: int) -> bool:
+    """Checked before uvicorn binds, so a clash is a sentence rather than a stack trace.
+
+    Not a race-free reservation — something could take the port between this check and the
+    bind. That is fine: the point is a readable message in the overwhelmingly common case,
+    not a guarantee.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.4)
+        return sock.connect_ex((host if host != "0.0.0.0" else "127.0.0.1", port)) != 0  # noqa: S104
+
+
 def serve() -> None:
     import uvicorn
 
     s = get_settings()
+    if not port_is_free(s.api_host, s.api_port):
+        # Observed live: 8080 was already taken and uvicorn raised a bare OSError with a
+        # winerror number. The fix is one env var and the user should not have to know that.
+        raise SystemExit(
+            f"Port {s.api_port} on {s.api_host} is already in use by something else.\n"
+            f"Set YOYO_API_PORT in .env to a free port and run `yoyo serve` again."
+        )
+    print(f"Yoyo UI:  http://{s.api_host}:{s.api_port}")  # noqa: T201
+    print(f"API:      http://{s.api_host}:{s.api_port}/health\n")  # noqa: T201
     uvicorn.run(app, host=s.api_host, port=s.api_port, log_level=s.log_level.lower())

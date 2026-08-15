@@ -1,0 +1,48 @@
+# Calendar accounts. READ ONLY — Yoyo cannot create, change, delete or RSVP to anything.
+#
+#   yoyo calendar accounts        show configuration and auth status
+#   yoyo calendar auth <name>     run the OAuth consent flow in a browser
+#   yoyo calendar agenda          today, across every enabled account
+#
+# ┌─ WHY THERE IS NO WRITE PATH ─────────────────────────────────────────────────┐
+# │ Mail has a draft path because a draft is inert — it sits in your mailbox      │
+# │ until you press send. A calendar has no equivalent. A "tentative" event is    │
+# │ already on other people's calendars and has already sent invitations. There   │
+# │ is no way for Yoyo to propose a meeting without acting on your behalf, so it  │
+# │ does not propose meetings. If you want that later, the honest shape is a      │
+# │ draft NOTE in the vault for you to act on — not a write scope here.           │
+# └──────────────────────────────────────────────────────────────────────────────┘
+#
+# ┌─ THIS SHARES ITS OAUTH APP WITH MAIL ────────────────────────────────────────┐
+# │ Same Google "Desktop app" client, same Entra Application ID. If mail is set   │
+# │ up, calendar is one API enable + one scope, not a second registration. Do     │
+# │ both in the same sitting.                                                     │
+# └──────────────────────────────────────────────────────────────────────────────┘
+#
+# Tokens are cached under data/calendar-tokens/ — separate from mail-tokens/ so revoking
+# calendar access does not revoke mail access. The disk is unencrypted (OQ4).
+
+accounts:
+  # --- Google Calendar -------------------------------------------------------
+  # 1. Google Cloud Console -> the SAME project as Gmail
+  # 2. APIs & Services -> Enable the Google Calendar API
+  # 3. Reuse the existing Desktop-app OAuth client — point client_secrets at the same JSON
+  # 4. Scope requested: calendar.readonly (not calendar, not calendar.events)
+  personal:
+    provider: google
+    client_secrets: secrets/gmail-personal.json   # yes, the same file as mail
+    calendar_id: primary
+    enabled: false
+    description: Personal Google Calendar
+
+  # --- Microsoft 365 ---------------------------------------------------------
+  # 1. Entra admin center -> App registrations -> the SAME app you made for mail
+  # 2. API permissions -> Microsoft Graph -> Delegated -> add Calendars.Read
+  #    Do NOT add Calendars.ReadWrite. Yoyo must not be able to change your calendar.
+  # 3. Paste the same Application (client) ID below
+  work:
+    provider: microsoft
+    client_id: REPLACE-WITH-APPLICATION-ID        # same ID as yoyo-mail.yaml
+    tenant: common
+    enabled: false
+    description: Microsoft 365 work calendar

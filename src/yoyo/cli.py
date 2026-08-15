@@ -11,17 +11,21 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
+from . import agent as agent_mod
 from . import backup as backup_mod
 from . import bench as bench_mod
-from . import agent as agent_mod
+from . import calendar as cal_mod
 from . import core, doctor
-from .graph import GraphBudget
-from .graph import run as graph_run
 from . import evals as evals_mod
 from . import mail as mail_mod
+from . import tasks as tasks_mod
 from . import tools as tools_mod
-from .mcp import client as mcp_client
+from . import voice as voice_mod
+from . import websearch as web_mod
 from .config import get_settings
+from .graph import GraphBudget
+from .graph import run as graph_run
+from .mcp import client as mcp_client
 from .rag import ingest as ingest_mod
 from .rag import retrieve as rag
 from .storage import db, vectors
@@ -412,6 +416,30 @@ def mcp_serve_mail() -> None:
     main()
 
 
+@mcp_app.command("serve-tasks")
+def mcp_serve_tasks() -> None:
+    """Serve the vault's checkbox tasks over stdio."""
+    from .mcp.tasks_server import main
+
+    main()
+
+
+@mcp_app.command("serve-calendar")
+def mcp_serve_calendar() -> None:
+    """Serve calendar events over stdio. Read-only."""
+    from .mcp.calendar_server import main
+
+    main()
+
+
+@mcp_app.command("serve-search")
+def mcp_serve_search() -> None:
+    """Serve web search and fetching over stdio."""
+    from .mcp.search_server import main
+
+    main()
+
+
 @mcp_app.command("serve-corpus")
 def mcp_serve_corpus() -> None:
     """Serve the ingested corpus over MCP on stdio. Read-only."""
@@ -513,6 +541,14 @@ def mail_auth(account: str) -> None:
     )
     provider = mail_mod.build(specs[account])
     console.print(f"[green]{provider.authenticate()}[/]")
+    # Authenticating a disabled account succeeds and then every later command refuses to use
+    # it. Observed live: auth said "authenticated personal (gmail)" and the very next search
+    # said "no mail accounts configured". Say it here, at the moment it can be acted on.
+    if not specs[account].enabled:
+        console.print(
+            f"[yellow]{account} is still `enabled: false` in yoyo-mail.yaml — "
+            f"set it to true or nothing will use this token.[/]"
+        )
 
 
 @mail_app.command("search")
@@ -529,8 +565,521 @@ def mail_search(
         flag = "[bold]*[/]" if m.unread else " "
         console.print(f"{flag} [dim]{when}[/] {escape(m.sender)}")
         console.print(f"   {escape(m.subject)}")
-        console.print(f"   [dim]{escape(m.snippet[:140])}[/]")
+        # Gmail's snippet is often just the subject again (shipping notices, receipts).
+        # Printing both doubles every result for no information.
+        snippet = m.snippet.strip()
+        if snippet and snippet[:60].lower() != m.subject.strip()[:60].lower():
+            console.print(f"   [dim]{escape(snippet[:140])}[/]")
         console.print(f"   [dim]id={m.id}[/]\n")
+
+
+voice_app = typer.Typer(help="Voice: engines, devices, and what actually works.")
+app.add_typer(voice_app, name="voice")
+
+
+@voice_app.command("status")
+def voice_status() -> None:
+    """What is configured for speech, and whether each piece actually works."""
+    _setup_logging()
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("component")
+    table.add_column("engine")
+    table.add_column("")
+    table.add_column("detail", overflow="fold")
+    for row in voice_mod.status():
+        table.add_row(
+            row["component"],
+            row["engine"],
+            "[green]ok[/]" if row["available"] else "[red]missing[/]",
+            escape(row["detail"] or row["hint"] or ""),
+        )
+    console.print(table)
+    console.print("[dim]All voice processing is local. No audio leaves this laptop.[/]")
+
+
+@voice_app.command("devices")
+def voice_devices() -> None:
+    """List microphones. The index goes in yoyo-voice.yaml under mic.device."""
+    _setup_logging()
+    from .voice.mic import default_device, list_devices
+
+    devices = list_devices()
+    if not devices:
+        console.print("[yellow]No input devices found.[/]")
+        raise typer.Exit(1)
+    chosen = default_device()
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("index", justify="right")
+    table.add_column("name", overflow="fold")
+    table.add_column("channels", justify="right")
+    for d in devices:
+        mark = " [green](default)[/]" if chosen and d["index"] == chosen["index"] else ""
+        table.add_row(str(d["index"]), escape(d["name"]) + mark, str(d["channels"]))
+    console.print(table)
+
+
+@app.command()
+def transcribe(
+    audio: Path = typer.Argument(..., exists=True, help="Audio file to transcribe"),
+    model: Optional[str] = typer.Option(None, help="Override the whisper model size"),  # noqa: UP045
+    language: Optional[str] = typer.Option(None, help='e.g. "en" — blank autodetects'),  # noqa: UP045
+    out: Optional[Path] = typer.Option(None, help="Write the transcript here (.md)"),  # noqa: UP045
+    ingest: bool = typer.Option(False, "--ingest", help="Also ingest it into the corpus"),
+    timestamps: bool = typer.Option(True, help="Keep [HH:MM:SS] markers"),
+) -> None:
+    """Transcribe an audio file locally. Nothing is uploaded."""
+    _setup_logging()
+    if not voice_mod.looks_like_audio(str(audio)):
+        console.print(f"[yellow]{audio.suffix} is not a known audio extension — trying anyway.[/]")
+
+    cfg = voice_mod.load_config()
+    engine = voice_mod.get_transcriber(cfg, model=model)
+    if not engine.is_available():
+        console.print('[red]faster-whisper is not installed.[/] uv pip install -e ".[voice]"')
+        raise typer.Exit(1)
+
+    console.print(f"[dim]transcribing {audio.name} — the first run downloads the model[/]")
+    result = engine.transcribe(str(audio), language=language or cfg.stt_language)
+
+    body = result.with_timestamps() if timestamps else result.text
+    console.print(escape(body))
+    console.print(
+        f"\n[dim]{result.engine} · {result.model} · {result.duration_s:.0f}s audio in "
+        f"{result.latency_ms / 1000:.1f}s ({result.realtime_factor:.1f}x realtime) · "
+        f"lang={result.language}[/]"
+    )
+    if not result.text.strip():
+        console.print("[yellow]Nothing was transcribed. Check the file has audible speech.[/]")
+        raise typer.Exit(1)
+
+    # A sidecar .md beside the audio, so ingest reuses the whole existing pipeline —
+    # content hashing, chunking, embedding — rather than a second path that would drift.
+    target = out or audio.with_suffix(".transcript.md")
+    header = (
+        f"# Transcript: {audio.name}\n\n"
+        f"- source: `{audio.name}`\n"
+        f"- duration: {voice_mod.format_timestamp(result.duration_s)}\n"
+        f"- engine: {result.engine}, model {result.model}\n"
+        f"- transcribed locally; audio never left this machine\n\n"
+    )
+    target.write_text(header + body + "\n", encoding="utf-8")
+    console.print(f"[green]wrote[/] {target}")
+
+    if ingest:
+        report = ingest_mod.ingest_path(target, recursive=False)
+        console.print(f"[green]{report.summary()}[/]")
+        for src, err in report.failed:
+            console.print(f"[yellow]failed[/] {src}: {err}")
+
+
+@app.command()
+def say(
+    text: str,
+    engine: Optional[str] = typer.Option(None, help="piper | sapi — overrides config"),  # noqa: UP045
+    out: Optional[Path] = typer.Option(None, help="Write a .wav instead of playing it"),  # noqa: UP045
+) -> None:
+    """Speak text aloud, or render it to a wav."""
+    _setup_logging()
+    speaker = voice_mod.get_speaker(engine=engine)
+    if not speaker.is_available():
+        console.print(f"[red]The {speaker.name} voice is not usable.[/] Run `yoyo voice status`.")
+        raise typer.Exit(1)
+    if out:
+        console.print(f"[green]wrote[/] {speaker.synthesise(text, str(out))}")
+    else:
+        speaker.speak(text)
+
+
+@app.command()
+def talk(
+    mode: str = typer.Option("agent", help="ask | agent | plan — how each turn is answered"),
+    device: Optional[int] = typer.Option(None, help="Microphone index"),  # noqa: UP045
+    speak_reply: bool = typer.Option(True, "--speak/--no-speak", help="Read answers aloud"),
+    mcp: bool = typer.Option(True, help="Mount MCP servers from yoyo-mcp.yaml"),
+) -> None:
+    """Push-to-talk conversation. ENTER starts recording, ENTER stops it.
+
+    Not held-key push-to-talk: reading a physical key state needs a raw console handler that
+    behaves differently across Windows terminals, and a voice loop that works in one shell
+    and silently fails in another is worse than one extra keypress.
+    """
+    _setup_logging()
+    if mode not in {"ask", "agent", "plan"}:
+        raise typer.BadParameter("mode must be ask, agent or plan")
+
+    cfg = voice_mod.load_config()
+    stt = voice_mod.get_transcriber(cfg)
+    if not stt.is_available():
+        console.print('[red]faster-whisper is not installed.[/] uv pip install -e ".[voice]"')
+        raise typer.Exit(1)
+
+    speaker = None
+    if speak_reply:
+        speaker = voice_mod.get_speaker(cfg)
+        if not speaker.is_available():
+            console.print(f"[yellow]{speaker.name} unusable — printing answers only.[/]")
+            speaker = None
+
+    if mcp and mode in {"agent", "plan"}:
+        for name, r in mcp_client.mount_all().items():
+            if not r["ok"]:
+                console.print(f"[yellow]mcp {name}: {escape(r['error'])}[/]")
+
+    from .voice.mic import Recorder
+
+    console.print(
+        f"[bold]Talk[/] — mode [cyan]{mode}[/]. "
+        f"ENTER to start recording, ENTER again to stop. Ctrl-C or an empty line to quit.\n"
+        f"[dim]Audio is transcribed on this laptop; only the text reaches the model.[/]"
+    )
+    # Load the model before the first turn, otherwise the user speaks into a void while a
+    # multi-hundred-MB model loads and assumes the microphone is broken.
+    console.print("[dim]loading the speech model...[/]")
+    stt.load()
+
+    conversation: int | None = None
+    while True:
+        try:
+            if input("\n[press ENTER to speak] ").strip():
+                break
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        try:
+            with Recorder(device=device if device is not None else cfg.mic_device) as rec:
+                console.print("[red]● recording[/] — press ENTER to stop")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                rec.drain()
+                seconds = rec.seconds
+        except voice_mod.AudioDeviceError as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            raise typer.Exit(1) from exc
+
+        if rec.too_short:
+            console.print(f"[yellow]only {seconds:.1f}s captured — ignoring.[/]")
+            continue
+
+        heard = stt.transcribe_pcm(rec.pcm, 16_000, language=cfg.stt_language)
+        question = heard.text.strip()
+        console.print(f"[dim]heard ({seconds:.1f}s → {heard.latency_ms / 1000:.1f}s):[/] "
+                      f"[bold]{escape(question)}[/]")
+        if not question:
+            console.print("[yellow]Nothing recognised. Try again closer to the mic.[/]")
+            continue
+
+        if mode == "ask":
+            answer = core.ask(question, conversation_id=conversation)
+            conversation = answer.conversation_id or conversation
+            text, meta = answer.text, f"{answer.model} · {answer.latency_ms} ms"
+        elif mode == "agent":
+            result = agent_mod.run(question)
+            text = result.text
+            meta = f"{result.model} · {result.latency_ms} ms · {result.iterations} iters"
+            if result.fabricated_links:
+                console.print(
+                    f"[yellow]removed {len(result.fabricated_links)} fabricated path(s)[/]"
+                )
+        else:
+            result = graph_run(question)
+            text = result.answer
+            meta = (
+                f"{result.latency_ms / 1000:.1f}s · {result.subtask_count} subtasks"
+            )
+
+        console.print(escape(text))
+        console.print(f"[dim]{meta}[/]")
+        if speaker:
+            try:
+                speaker.speak(text)
+            except voice_mod.VoiceError as exc:
+                console.print(f"[yellow]could not speak: {escape(str(exc))}[/]")
+
+    console.print("[dim]bye[/]")
+
+calendar_app = typer.Typer(help="Calendar: Google and Microsoft 365. Read only.")
+app.add_typer(calendar_app, name="calendar")
+
+
+@calendar_app.command("accounts")
+def calendar_accounts() -> None:
+    """Configured calendar accounts and whether each is authenticated."""
+    _setup_logging()
+    rows = cal_mod.status()
+    if not rows:
+        console.print("[yellow]No accounts in yoyo-calendar.yaml[/]")
+        raise typer.Exit(0)
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("account")
+    table.add_column("provider")
+    table.add_column("enabled")
+    table.add_column("authenticated")
+    table.add_column("note", overflow="fold")
+    for r in rows:
+        auth = r.get("authenticated")
+        table.add_row(
+            r["account"],
+            r["provider"],
+            "yes" if r["enabled"] else "[dim]no[/]",
+            "[green]yes[/]" if auth else ("[red]no[/]" if r["enabled"] else "[dim]-[/]"),
+            escape(r.get("error") or r.get("description") or ""),
+        )
+    console.print(table)
+    console.print(f"[dim]tokens: {cal_mod.token_dir()}[/]")
+    console.print("[dim]Read-only: Yoyo cannot create, change, delete or RSVP to events.[/]")
+
+
+@calendar_app.command("auth")
+def calendar_auth(account: str) -> None:
+    """Run the OAuth consent flow for one calendar account."""
+    _setup_logging()
+    specs = {s.name: s for s in cal_mod.load_accounts()}
+    if account not in specs:
+        raise typer.BadParameter(
+            f"unknown account {account!r}. Configured: {', '.join(sorted(specs)) or '<none>'}"
+        )
+    console.print(
+        "[yellow]Note:[/] this stores a refresh token for your calendar under "
+        f"{cal_mod.token_dir()}. The disk is not encrypted (OQ4).\n"
+        "[dim]Scope requested is read-only — calendar.readonly / Calendars.Read.[/]"
+    )
+    provider = cal_mod.build(specs[account])
+    console.print(f"[green]{provider.authenticate()}[/]")
+    if not specs[account].enabled:
+        console.print(
+            f"[yellow]{account} is still `enabled: false` in yoyo-calendar.yaml — "
+            f"set it to true or nothing will use this token.[/]"
+        )
+
+
+@calendar_app.command("agenda")
+def calendar_agenda(
+    day: Optional[str] = typer.Option(None, help="YYYY-MM-DD, default today"),  # noqa: UP045
+    days: int = typer.Option(1, help="How many days forward"),
+    account: Optional[str] = typer.Option(None),  # noqa: UP045
+) -> None:
+    """Show the agenda, merged across every enabled account."""
+    _setup_logging()
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
+    target = _date.today()
+    if day:
+        try:
+            target = _datetime.strptime(day, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise typer.BadParameter("day must be YYYY-MM-DD") from exc
+
+    events = cal_mod.agenda(day=target, days=days, account=account)
+    if not events:
+        console.print(f"[dim]Nothing scheduled for {target} (+{days - 1} days).[/]")
+        raise typer.Exit(0)
+
+    for e in events:
+        when = "all day" if e.all_day else (e.start.strftime("%a %d %b %H:%M") if e.start else "?")
+        flag = "[red]✗[/]" if e.response == "declined" else " "
+        console.print(f"{flag} [bold]{escape(when)}[/] {escape(e.title)}")
+        bits = []
+        if e.duration_minutes:
+            bits.append(f"{e.duration_minutes} min")
+        if e.location:
+            bits.append(escape(e.location))
+        if e.online_url:
+            bits.append("online")
+        if e.attendees:
+            bits.append(f"{len(e.attendees)} attendees")
+        if bits:
+            console.print(f"   [dim]{' · '.join(bits)}[/]")
+
+    clashes = cal_mod.find_conflicts(events)
+    summary = cal_mod.summarise(events)
+    console.print(
+        f"\n[dim]{summary['count']} events · {summary['busy_minutes']} busy minutes · "
+        f"{summary['declined']} declined[/]"
+    )
+    for a, b in clashes:
+        console.print(f"[yellow]clash:[/] {escape(a.title)} ↔ {escape(b.title)}")
+
+
+@calendar_app.command("search")
+def calendar_search(
+    query: str,
+    account: Optional[str] = typer.Option(None),  # noqa: UP045
+    limit: int = typer.Option(10),
+) -> None:
+    """Search calendar events without involving a model."""
+    _setup_logging()
+    provider = cal_mod.resolve(account)
+    for e in provider.search(query, limit=limit):
+        when = e.start.strftime("%Y-%m-%d %H:%M") if e.start else "?"
+        console.print(f"[dim]{when}[/] [bold]{escape(e.title)}[/]")
+        if e.location:
+            console.print(f"   [dim]{escape(e.location)}[/]")
+
+
+tasks_app = typer.Typer(help="Tasks from the vault's Markdown checkboxes. Read only.")
+app.add_typer(tasks_app, name="tasks")
+
+
+@tasks_app.command("list")
+def tasks_list(
+    status: str = typer.Option("open", help="open | done | all"),
+    due_before: Optional[str] = typer.Option(None, help="YYYY-MM-DD"),  # noqa: UP045
+    tag: Optional[str] = typer.Option(None),  # noqa: UP045
+    contains: Optional[str] = typer.Option(None),  # noqa: UP045
+    folder: str = typer.Option("", help="Restrict to a vault subfolder"),
+    limit: int = typer.Option(50),
+) -> None:
+    """List tasks found in the vault, soonest deadline first."""
+    _setup_logging()
+    try:
+        items = tasks_mod.query(
+            status=status, folder=folder, due_before=due_before,
+            tag=tag, contains=contains, limit=limit,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from None
+
+    if not items:
+        console.print("[dim]No matching tasks.[/]")
+        raise typer.Exit(0)
+
+    from datetime import date as _date
+
+    today = _date.today()
+    for t in items:
+        box = "[green]x[/]" if not t.open else " "
+        due = ""
+        if t.due:
+            colour = "red" if t.overdue(today) else "cyan"
+            due = f" [{colour}]{t.due}[/]"
+        pri = f" [magenta]{t.priority}[/]" if t.priority else ""
+        tags = f" [dim]{' '.join('#' + x for x in t.tags)}[/]" if t.tags else ""
+        console.print(f"[{box}] {escape(t.text)}{due}{pri}{tags}")
+        console.print(f"    [dim]{escape(t.note)}:{t.line}[/]")
+
+
+@tasks_app.command("summary")
+def tasks_summary() -> None:
+    """Counts only — total, open, overdue, undated."""
+    _setup_logging()
+    for k, v in tasks_mod.summary().items():
+        console.print(f"{k:20} {v}")
+
+@mail_app.command("read")
+def mail_read(
+    message_id: str,
+    account: Optional[str] = typer.Option(None),  # noqa: UP045
+    body: bool = typer.Option(True, "--body/--no-body"),
+) -> None:
+    """Read one message by id. This is how you resolve a [mail:<id>] citation.
+
+    A citation nobody can follow is decoration. Corpus answers cite chunk ids you can look
+    up with `yoyo search`; this is the mail equivalent, and it exists so an answer about
+    your inbox is checkable without hunting through Gmail by hand.
+    """
+    _setup_logging()
+    provider = mail_mod.resolve(account)
+    m = provider.read(message_id.removeprefix("mail:"))
+    when = m.date.strftime("%Y-%m-%d %H:%M") if m.date else "?"
+    console.print(f"[bold]{escape(m.subject)}[/]")
+    console.print(f"[dim]from[/] {escape(m.sender)}")
+    console.print(f"[dim]to[/]   {escape(', '.join(m.to))}")
+    console.print(f"[dim]{when} · {escape(m.citation)}[/]\n")
+    if body and m.body:
+        console.print(escape(m.body[:8000]))
+
+
+@mail_app.command("draft")
+def mail_draft(
+    to: str = typer.Option(..., help="Comma-separated recipients"),
+    subject: str = typer.Option(...),
+    body: str = typer.Option(..., help="Plain text body"),
+    cc: Optional[str] = typer.Option(None),  # noqa: UP045
+    reply_to: Optional[str] = typer.Option(None, help="Message id to thread the reply under"),  # noqa: UP045
+    account: Optional[str] = typer.Option(None),  # noqa: UP045
+) -> None:
+    """Save a draft. It is NOT sent — Yoyo has no send path, by design.
+
+    Exposed on the CLI so the draft path can be exercised deliberately, on a message you
+    chose, rather than first discovered when an agent writes one unprompted.
+    """
+    _setup_logging()
+    provider = mail_mod.resolve(account)
+    draft = provider.create_draft(
+        to=[a.strip() for a in to.split(",") if a.strip()],
+        subject=subject,
+        body=body,
+        cc=[a.strip() for a in cc.split(",")] if cc else None,
+        reply_to_message_id=(reply_to.removeprefix("mail:") if reply_to else None),
+    )
+    console.print(f"[green]saved draft[/] {escape(draft.id)} — [bold]not sent[/]")
+    console.print("[dim]Open Gmail → Drafts to review and send it yourself.[/]")
+
+
+web_app = typer.Typer(help="Web search and fetching, via your self-hosted SearXNG.")
+app.add_typer(web_app, name="web")
+
+
+@web_app.command("search")
+def web_search(query: str, limit: int = typer.Option(8)) -> None:
+    """Search the web without involving a model. The query leaves this machine."""
+    _setup_logging()
+    try:
+        results = web_mod.search(query, limit=limit)
+    except web_mod.SearchError as exc:
+        console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(1) from None
+    if not results:
+        console.print("[yellow]No results.[/]")
+        raise typer.Exit(0)
+    for r in results:
+        console.print(f"[bold]{escape(r.title)}[/]")
+        console.print(f"  [cyan]{escape(r.url)}[/]")
+        if r.snippet:
+            console.print(f"  [dim]{escape(r.snippet[:200])}[/]")
+        console.print()
+    console.print("[dim]Logged to data/egress.jsonl — `yoyo web egress`[/]")
+
+
+@web_app.command("fetch")
+def web_fetch(url: str, chars: int = typer.Option(4000, help="How much text to print")) -> None:
+    """Fetch one page and print its readable text."""
+    _setup_logging()
+    try:
+        page = web_mod.fetch(url)
+    except web_mod.BlockedTarget as exc:
+        console.print(f"[red]refused:[/] {escape(str(exc))}")
+        raise typer.Exit(2) from None
+    except web_mod.SearchError as exc:
+        console.print(f"[red]{escape(str(exc))}[/]")
+        raise typer.Exit(1) from None
+    console.print(f"[bold]{escape(page.title)}[/]")
+    console.print(f"[dim]{escape(page.url)} · {page.fetched_ms} ms"
+                  f"{' · truncated' if page.truncated else ''}[/]\n")
+    console.print(escape(page.text[:chars]))
+
+
+@web_app.command("egress")
+def web_egress(limit: int = typer.Option(30)) -> None:
+    """What Yoyo has sent to the internet. The audit ADR-009 promised and Windows lost."""
+    _setup_logging()
+    entries = web_mod.read_egress(limit=limit)
+    if not entries:
+        console.print("[dim]Nothing sent yet.[/]")
+        raise typer.Exit(0)
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("when")
+    table.add_column("kind")
+    table.add_column("target / query", overflow="fold")
+    for e in entries:
+        table.add_row(e.get("at", "?"), e.get("kind", "?"),
+                      escape(e.get("detail") or e.get("target", "")))
+    console.print(table)
+    console.print(f"[dim]{web_mod.egress_log_path()}[/]")
 
 
 if __name__ == "__main__":

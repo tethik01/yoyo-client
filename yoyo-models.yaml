@@ -1,8 +1,8 @@
 # Yoyo model configuration.
 #
 # Yoyo code names a ROLE. This file maps roles to the endpoint CAPABILITY names that
-# MyAIServer exposes (`agent`, `fast`). Model identity is a server-side concern and is
-# recorded here as a comment only — never referenced in code.
+# MyAIServer exposes (`agent`, `coder`, `fast`). Model identity is a server-side concern
+# and is recorded here as a comment only — never referenced in code.
 #
 # Verified against LiteLLM 2026-08-15: the endpoint serves `agent`, `coder` and `fast`.
 #
@@ -11,8 +11,12 @@
 # │ called the tool once, errored, and gave up; 1/4 did not call it at all and    │
 # │ fabricated a plausible answer (invented a stock price, with a confident       │
 # │ caveat). A fabricated answer that looks right is worse than a refusal.        │
-# │ Any role with tools: true MUST point at `agent`. Enforced in llm.py — a       │
-# │ violation raises, it does not warn.                                           │
+# │ A role with tools: true must point at a capability that has PASSED the        │
+# │ fidelity gate — currently `coder` (preferred) or `agent` (fallback), never    │
+# │ `fast`. Enforced in llm.py — a violation raises, it does not warn.            │
+# │ NOTE: this said "MUST point at `agent`" until 2026-08-15, when `coder` passed │
+# │ the gates (ADR-027). The rule was never about `agent`; it was about having    │
+# │ evidence, and `agent` was simply the only capability that had any.            │
 # └──────────────────────────────────────────────────────────────────────────────┘
 
 endpoint:

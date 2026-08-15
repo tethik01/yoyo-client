@@ -545,3 +545,96 @@ def test_prompt_forbids_reporting_absence_from_one_source():
     reported as 'not there'. The prompt has to name that distinction explicitly."""
     assert "is not the same claim as" in agent.SYSTEM_PROMPT
     assert "several parts" in agent.SYSTEM_PROMPT
+
+
+# ------------------------------------------- empty results (2026-08-15) --------
+# Regression from a live turn. `mail_search("Suno charge*")` matched nothing because of the
+# wildcard, and the model answered "I found no records of Suno charges in your mail" — for a
+# receipt that `yoyo mail read` produced seconds later. Zero results was read as absence.
+#
+# The prompt was actively against us: "if a search returns nothing useful, say so" was
+# written to stop budget-wasting rewording, and it does not distinguish "found things, none
+# relevant" from "found literally nothing, so the query is suspect".
+
+
+def _search_registry(result):
+    reg = Registry()
+    reg.add(
+        Tool(
+            name="mail_search",
+            description="search mail",
+            params=EchoArgs,
+            fn=lambda a: result,
+        )
+    )
+    return reg
+
+
+def test_a_zero_result_search_is_flagged_as_a_query_problem(monkeypatch):
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("mail_search", '{"value": "Suno charge*"}', "c1")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_search_registry({"count": 0, "messages": []}))
+    content = _last_tool_content(seen)
+    assert "returned NOTHING" in content
+    assert "your query was wrong" in content
+
+
+def test_a_search_with_hits_gets_no_such_note(monkeypatch):
+    """The nudge must not fire on success, or it becomes noise the model learns to skip."""
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("mail_search", '{"value": "Suno"}', "c1")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_search_registry({"count": 1, "messages": [{"id": "m1"}]}))
+    assert "returned NOTHING" not in _last_tool_content(seen)
+
+
+@pytest.mark.parametrize(
+    "empty",
+    [{"count": 0}, {"messages": []}, {"count": 0, "hits": []}, [], {}, None, ""],
+)
+def test_the_common_shapes_of_nothing_are_all_recognised(empty):
+    """Tools report emptiness however suits them; a convention nobody enforces would be
+    silently violated by the next tool added."""
+    assert agent._looks_empty(empty) is True
+
+
+@pytest.mark.parametrize(
+    "found",
+    [{"count": 1, "messages": [{"id": "x"}]}, {"hits": [1]}, [1], "text", {"count": 3}],
+)
+def test_real_results_are_not_mistaken_for_nothing(found):
+    assert agent._looks_empty(found) is False
+
+
+def test_the_empty_hint_stops_once_the_tool_has_been_hammered(monkeypatch):
+    """At the hard limit the advice becomes "stop", not "try once more" — otherwise a tool
+    that always returns nothing would loop until the budget is gone."""
+    seen = _scripted(
+        monkeypatch,
+        [
+            {"tool_calls": [_call("mail_search", '{"value": "a"}', "c1")]},
+            {"tool_calls": [_call("mail_search", '{"value": "b"}', "c2")]},
+            {"tool_calls": [_call("mail_search", '{"value": "c"}', "c3")]},
+            {"text": "done"},
+        ],
+    )
+    agent.run("q", tool_registry=_search_registry({"count": 0}))
+    content = _last_tool_content(seen)
+    assert "3 times this turn" in content
+    assert "returned NOTHING" not in content
+
+
+def test_the_prompt_separates_zero_results_from_unhelpful_results():
+    assert "ZERO results is different" in agent.SYSTEM_PROMPT
+    assert "evidence your QUERY was wrong" in agent.SYSTEM_PROMPT
+    # The old blanket instruction must not come back — it is what caused the false negative.
+    assert "if a search returns nothing useful, say so" not in agent.SYSTEM_PROMPT

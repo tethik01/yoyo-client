@@ -1,0 +1,57 @@
+# Voice configuration: speech to text, text to speech, microphone.
+#
+#   yoyo voice status         what is configured and what actually works
+#   yoyo voice devices        list microphones
+#   yoyo transcribe <file>    audio -> text (add --ingest to put it in the corpus)
+#   yoyo say "text"           text -> speech
+#   yoyo talk                 push-to-talk conversation
+#
+# ┌─ EVERYTHING HERE RUNS ON THIS LAPTOP ────────────────────────────────────────┐
+# │ No audio is sent to MyAIServer or anywhere else. This is deliberate: audio   │
+# │ is the most sensitive input Yoyo handles — it captures people who never      │
+# │ agreed to be recorded by an assistant — and Yoyo's egress is currently       │
+# │ unaudited (OQ5). Only the TRANSCRIBED TEXT reaches the model, and only when  │
+# │ you ask a question with it.                                                  │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+stt:
+  engine: whisper          # faster-whisper (CTranslate2). Only engine implemented.
+
+  # tiny | base | small | medium | large-v3
+  #
+  # Bigger is more accurate and slower, and the trade-off is NOT linear on proper nouns —
+  # the thing that matters most here. Your corpus is full of words a small model mangles:
+  # "Qdrant" -> "quadrant", "LiteLLM" -> "light LLM", "Tailscale" -> "tail scale".
+  # `small` is the starting point, not the answer. Measure on your own audio:
+  #   yoyo transcribe sample.m4a --model base
+  #   yoyo transcribe sample.m4a --model small
+  #   yoyo transcribe sample.m4a --model medium
+  # and compare both the text and the reported realtime factor.
+  model: small
+
+  device: auto             # auto | cpu | cuda — auto falls back to cpu if CTranslate2
+                           # cannot actually use the GPU, which is the common Windows case
+  compute_type:            # blank = int8 on cpu, float16 on cuda
+  language:                # blank = autodetect. Set "en" to stop it guessing on short clips.
+  beam_size: 5
+
+  # Whisper invents fluent, confident sentences out of silence. It is a well-documented
+  # failure mode and exactly the kind this project refuses to ship. Voice-activity
+  # detection trims non-speech before the model sees it. Leave this on.
+  vad_filter: true
+
+tts:
+  # sapi  — built into Windows. No install, no download, sounds like a satnav.
+  # piper — small neural TTS, close to natural, needs one .onnx voice file.
+  engine: sapi
+
+  # For piper: download a voice from the Piper releases and point at the .onnx here.
+  # Relative paths resolve from the repo root.
+  model_path:              # e.g. data/voice-models/en_GB-alba-medium.onnx
+  binary:                  # optional explicit path to the piper executable
+
+mic:
+  device:                  # blank = system default. `yoyo voice devices` lists indices.
+
+# Models are cached under data/voice-models/ — never %TEMP%, which Windows cleans out
+# from under you (learned with fastembed: a cached model silently re-downloads).

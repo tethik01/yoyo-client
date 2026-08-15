@@ -1,0 +1,61 @@
+# Web search and page fetching, through a SELF-HOSTED SearXNG.
+#
+#   yoyo web search "query"      search, no model involved
+#   yoyo web fetch <url>         read one page
+#   yoyo web egress              what Yoyo has sent out, most recent first
+#
+# ┌─ THIS IS THE ONE COMPONENT THAT SENDS DATA OUT ──────────────────────────────┐
+# │ Everything else in Yoyo is local. Search is not, and cannot be.              │
+# │                                                                              │
+# │ SearXNG helps: it proxies your queries to Google, Bing and others, so no      │
+# │ single vendor holds an API key tied to you and profiles every search Yoyo     │
+# │ makes. It does NOT make search private — the queries still leave. That is an  │
+# │ improvement, not a fix, and ADR-029 records it as one.                        │
+# │                                                                              │
+# │ Never put anything in a query you would not hand to a search engine. Yoyo     │
+# │ will search whatever an agent decides to search, and an agent reading your    │
+# │ mail could put its contents in a query. Read `yoyo web egress` occasionally.  │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+searxng:
+  # Your local instance. Not a public SearXNG — those log too, and you would be
+  # trusting a stranger's server with the same queries.
+  base_url: http://localhost:8888
+
+  # SearXNG DISABLES its JSON API by default. Without this, every request 403s and the
+  # error page explains nothing:
+  #
+  #   search:
+  #     formats:
+  #       - html
+  #       - json
+  #
+  # in the container's settings.yml, then restart it.
+
+  engines:                 # blank = SearXNG's own defaults
+  categories: general
+  language: en
+  safesearch: 0
+  timeout_s: 30
+  max_results: 8           # a 32K context does not survive twenty results plus their pages
+
+fetch:
+  # Page text handed to the model. A long article alone can exceed the whole budget; a
+  # page the model knows is truncated beats a blown context.
+  max_page_chars: 12000
+  max_page_bytes: 5000000
+
+  # Fetching is refused for private, loopback and link-local addresses — checked AFTER
+  # DNS resolution, because `evil.com` can resolve to 127.0.0.1 and a string check would
+  # wave it through. That guard is in code, not config, and is not adjustable: it is what
+  # stops a fetched web page reaching Qdrant, the model endpoint, or a router admin page.
+  #
+  # This list is for public domains you additionally never want fetched.
+  blocked_domains: []
+
+# Every outbound request is appended to data/egress.jsonl.
+#
+# ADR-009 promised a Squid audit boundary; ADR-021 lost it moving to Windows, and OQ5 has
+# been open since. This does not restore the control — it blocks nothing — but it restores
+# the visibility, which is the half that answers "what has this thing been sending?".
+log_egress: true

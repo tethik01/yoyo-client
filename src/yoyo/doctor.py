@@ -28,6 +28,8 @@ def run_all() -> list[Check]:
     _embeddings(checks)
     _sqlite(checks)
     _qdrant(checks)
+    _vault(checks)
+    _optional_configs(checks)
     return checks
 
 
@@ -43,9 +45,38 @@ def _env() -> Check:
             f"YOYO_REQUEST_TIMEOUT={s.request_timeout}s is below the server's 900s; "
             f"agent tool loops will look like failures"
         )
+    duplicates = duplicate_env_keys()
+    if duplicates:
+        # Observed live: `.env` carried two YOYO_VAULT_PATH lines after an edit. dotenv
+        # resolves to the last one, so it worked — but which value was in force was
+        # invisible to anyone reading the file, and the losing line looked authoritative.
+        # A config that behaves differently from how it reads is the same class of problem
+        # as a doc that disagrees with the code.
+        problems.append(
+            "duplicate keys in .env: " + ", ".join(duplicates)
+            + " (the LAST occurrence wins — delete the others)"
+        )
+
     if problems:
         return Check("env", False, "; ".join(problems))
     return Check("env", True, f"{s.llm_base_url} timeout={s.request_timeout}s")
+
+
+def duplicate_env_keys(path=None) -> list[str]:  # noqa: ANN001
+    """Keys assigned more than once in `.env`, in file order."""
+    from .config import REPO_ROOT
+
+    path = path or (REPO_ROOT / ".env")
+    if not path.exists():
+        return []
+    seen: dict[str, int] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        seen[key] = seen.get(key, 0) + 1
+    return [k for k, n in seen.items() if n > 1]
 
 
 def _server(checks: list[Check]) -> list[str]:
@@ -89,7 +120,10 @@ def _tool_fidelity(checks: list[Check]) -> None:
                 False,
                 "tool-using roles on a fabricating endpoint: "
                 + "; ".join(bad)
-                + ". Point them at 'agent'.",
+                + ". Point them at a capability that has PASSED the fidelity gate "
+                "(`coder`, or `agent` as the fallback). This said \"point them at "
+                "'agent'\" until 2026-08-15 — the rule was never about `agent`, it was "
+                "about having evidence, and `agent` was the only one that had any.",
             )
         )
         return
@@ -154,9 +188,94 @@ def _qdrant(checks: list[Check]) -> None:
             "qdrant",
             ok,
             f"points={i['points']} dim={i['dimensions']} status={i['status']}"
-            + ("" if ok else f" — MISMATCH vs embed dim {embeddings.dimensions()}; reindex --recreate"),
+            + ("" if ok else f" — MISMATCH vs embed dim {embeddings.dimensions()}; "
+                           "reindex --recreate"),
         )
     )
+
+
+def _vault(checks: list[Check]) -> None:
+    """The vault is canon and is easy to get subtly wrong.
+
+    Two failures already cost real time: an empty YOYO_VAULT_PATH resolved to `.` and made
+    the working directory the vault, and pointing at `test-vault` while believing it was the
+    real one produces answers that are correct about the wrong corpus. Neither raises.
+    """
+    from . import vault
+
+    try:
+        root = vault.vault_root()
+    except vault.VaultError as exc:
+        message = exc.args[0]
+        # UNSET is a legitimate state — vault features are optional, and failing doctor over
+        # one would train the user to ignore a red check.
+        # MISCONFIGURED is not: a path that points at a file, or at somewhere that no longer
+        # exists, means vault tools will fail at the worst moment with no warning here.
+        if "No vault configured" in message:
+            checks.append(Check("vault", True, "not configured (vault features are off)"))
+        else:
+            checks.append(Check("vault", False, f"YOYO_VAULT_PATH is set but unusable: {message}"))
+        return
+
+    notes = vault._notes(root)
+    detail = f"{root} — {len(notes)} notes"
+    if root.name == "test-vault" or len(notes) < 5:
+        # A warning, not a failure: a small vault is valid, it is just very often the
+        # scaffold rather than the real thing.
+        detail += "  [looks like the test scaffold, not a real Obsidian vault]"
+    checks.append(Check("vault", True, detail))
+
+
+def _optional_configs(checks: list[Check]) -> None:
+    """Config files parse, and optional extras are present or honestly absent.
+
+    Deliberately does NOT touch the network or any credential — `yoyo doctor` must stay
+    fast and runnable offline. Authentication status is `yoyo mail accounts` /
+    `yoyo calendar accounts`, which is a different question.
+    """
+    notes: list[str] = []
+    problems: list[str] = []
+
+    for label, loader in (("mail", _mail_accounts), ("calendar", _calendar_accounts)):
+        try:
+            total, enabled = loader()
+        except Exception as exc:  # noqa: BLE001 - a malformed yaml must not kill doctor
+            problems.append(f"{label} config: {exc}")
+            continue
+        notes.append(f"{label} {enabled}/{total} enabled" if total else f"{label} none configured")
+
+    try:
+        from . import voice
+
+        cfg = voice.load_config()
+        stt = voice.get_transcriber(cfg)
+        speaker = voice.get_speaker(cfg)
+        notes.append(
+            f"voice stt={cfg.stt_model}"
+            f"{'' if stt.is_available() else ' (engine NOT installed)'}"
+            f" tts={speaker.name}{'' if speaker.is_available() else ' (unusable)'}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        problems.append(f"voice config: {exc}")
+
+    if problems:
+        checks.append(Check("optional configs", False, "; ".join(problems)))
+        return
+    checks.append(Check("optional configs", True, " · ".join(notes)))
+
+
+def _mail_accounts() -> tuple[int, int]:
+    from . import mail
+
+    specs = mail.load_accounts()
+    return len(specs), sum(1 for s in specs if s.enabled)
+
+
+def _calendar_accounts() -> tuple[int, int]:
+    from . import calendar as cal
+
+    specs = cal.load_accounts()
+    return len(specs), sum(1 for s in specs if s.enabled)
 
 
 def summary() -> dict[str, object]:

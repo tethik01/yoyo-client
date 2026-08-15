@@ -40,9 +40,27 @@ class Message:
     unread: bool = False
     labels: list[str] = field(default_factory=list)
 
+    @property
+    def citation(self) -> str:
+        """The checkable reference for this message.
+
+        Corpus answers cite `[7]` and vault answers cite `[MyAIServer.md]`; mail answers
+        cited nothing, so "Suno charged you $11.30" was unverifiable without searching your
+        own inbox by hand. That is precisely the trust-me answer this project refuses
+        everywhere else.
+
+        Deliberately an IDENTIFIER, not a URL. Yoyo could assemble a
+        `https://mail.google.com/mail/u/0/#all/<id>` link, but `u/0` guesses which signed-in
+        account you are, the format is undocumented, and a citation that silently opens the
+        wrong mailbox is worse than one you have to paste. `yoyo mail read <id>` resolves it,
+        and the model copies this string rather than building anything.
+        """
+        return f"mail:{self.id}"
+
     def as_dict(self, include_body: bool = False) -> dict[str, Any]:
         out: dict[str, Any] = {
             "id": self.id,
+            "citation": self.citation,
             "account": self.account,
             "thread_id": self.thread_id,
             "subject": self.subject,

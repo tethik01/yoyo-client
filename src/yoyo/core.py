@@ -53,6 +53,97 @@ def history(conversation_id: int, limit: int = 20) -> list[dict[str, str]]:
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 
+#: Auto-title length. Long enough to tell two conversations apart in a sidebar, short
+#: enough not to wrap. Derived from the first question because asking the user to name a
+#: conversation before having one is a step nobody takes.
+TITLE_CHARS = 60
+
+
+def title_for(question: str) -> str:
+    text = " ".join((question or "").split())
+    return text[:TITLE_CHARS] + ("…" if len(text) > TITLE_CHARS else "") or "(untitled)"
+
+
+def list_conversations(limit: int = 50) -> list[dict[str, object]]:
+    """Most recently updated first — the order a sidebar wants."""
+    with db.connection() as conn:
+        rows = conn.execute(
+            """SELECT c.id, c.title, c.created_at, c.updated_at,
+                      (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS turns
+                 FROM conversations c
+                ORDER BY c.updated_at DESC, c.id DESC
+                LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def conversation_messages(conversation_id: int, limit: int = 200) -> list[dict[str, object]]:
+    """Oldest first — reading order, not history order."""
+    with db.connection() as conn:
+        rows = conn.execute(
+            """SELECT id, role, content, model, latency_ms, created_at, metadata
+                 FROM messages WHERE conversation_id = ? ORDER BY id LIMIT ?""",
+            (conversation_id, limit),
+        ).fetchall()
+    out = []
+    for r in rows:
+        entry = dict(r)
+        try:
+            entry["metadata"] = json.loads(entry.get("metadata") or "{}")
+        except json.JSONDecodeError:
+            entry["metadata"] = {}
+        out.append(entry)
+    return out
+
+
+def delete_conversation(conversation_id: int) -> None:
+    with db.connection() as conn, db.transaction(conn):
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+
+
+def persist_turn(
+    conversation_id: int,
+    question: str,
+    answer: str,
+    *,
+    model: str = "",
+    role: str = "",
+    latency_ms: int = 0,
+    metadata: dict | None = None,
+) -> int:
+    """Record one question/answer pair from ANY path — ask, agent or graph.
+
+    `_persist` below is the RAG-specific version and also writes citations. This is the
+    plain one, added because agent and graph turns were never persisted at all: the UI could
+    show you a conversation and lose it on refresh, and a follow-up question had no idea what
+    came before.
+    """
+    with db.connection() as conn, db.transaction(conn):
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content) VALUES (?,'user',?)",
+            (conversation_id, question),
+        )
+        cur = conn.execute(
+            """INSERT INTO messages
+                 (conversation_id, role, content, capability, model, latency_ms, metadata)
+               VALUES (?,'assistant',?,?,?,?,?)""",
+            (conversation_id, answer, role, model, latency_ms,
+             json.dumps(metadata or {}, default=str)),
+        )
+        conn.execute(
+            "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",
+            (conversation_id,),
+        )
+        # A conversation created before its first question has no title. Fill it in on the
+        # first turn rather than leaving "(untitled)" rows in the sidebar forever.
+        conn.execute(
+            "UPDATE conversations SET title = ? WHERE id = ? AND (title IS NULL OR title = '')",
+            (title_for(question), conversation_id),
+        )
+        return int(cur.lastrowid)
+
+
 def ask(
     question: str,
     *,
@@ -75,6 +166,20 @@ def ask(
     result = llm.chat(messages, role=role)
     latency_ms = int((time.monotonic() - started) * 1000)
 
+    # `ask` has NO tools, so nothing here can legitimately produce a web link — the only
+    # material available is the retrieved passages. Observed live in the UI: asked for local
+    # news with no web tool mounted, the model answered with three plausible, clickable,
+    # invented news-site URLs. The same provenance rule as the agent path, with retrieval
+    # standing in for tool results.
+    from . import citations
+
+    sources = "\n".join(p.text for p in passages)
+    answer_text, invented = citations.strip_unsupported_urls(result.text or "", sources)
+    cleaned, paths = citations.strip_fabricated_links(answer_text)
+    invented = sorted(set(invented) | set(paths))
+    if invented:
+        log.warning("stripped fabricated citation(s) from a RAG answer: %s", invented)
+
     message_id = None
     if conversation_id:
         message_id = _persist(
@@ -82,7 +187,7 @@ def ask(
         )
 
     return Answer(
-        text=result.text,
+        text=cleaned,
         model=result.model,
         passages=passages,
         latency_ms=latency_ms,
@@ -133,5 +238,9 @@ def _persist(
         conn.execute(
             "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?",
             (conversation_id,),
+        )
+        conn.execute(
+            "UPDATE conversations SET title = ? WHERE id = ? AND (title IS NULL OR title = '')",
+            (title_for(question), conversation_id),
         )
     return message_id

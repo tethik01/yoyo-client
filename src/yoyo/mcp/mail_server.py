@@ -36,7 +36,11 @@ def mail_accounts() -> dict:
         "Search mail. The query uses the provider's own syntax — Gmail: "
         "'from:alice after:2026/08/01 invoice'; Microsoft: free text. Returns message "
         "summaries with ids; call mail_read for full bodies. Omit `account` when only one "
-        "is configured."
+        "is configured.\n\n"
+        "Every message carries a `citation` field like `mail:19fe2cb1d4f118a3`. When you "
+        "state a fact that came from a message — an amount, a date, who said what — cite it "
+        "as [mail:<id>], copied EXACTLY. Never build a mail URL; the identifier is the "
+        "citation. An unattributed claim about someone's inbox cannot be checked."
     )
 )
 def mail_search(query: str, account: str = "", limit: int = 20) -> dict:
@@ -50,7 +54,10 @@ def mail_search(query: str, account: str = "", limit: int = 20) -> dict:
 
 
 @server.tool(
-    description="Read one message in full, including its body, by the id from mail_search."
+    description=(
+        "Read one message in full, including its body, by the id from mail_search. The "
+        "returned `citation` is what to quote when you use anything from this message."
+    )
 )
 def mail_read(message_id: str, account: str = "") -> dict:
     provider = mail.resolve(account or None)

@@ -15,15 +15,40 @@ servers:
   vault:
     command: python
     args: ["-m", "yoyo.mcp.vault_server"]
-    enabled: true
+    enabled: true          # live 2026-08-15 against C:\Projects\Yoyo\Notes
     prefix: vault
+
+  # Tasks: the vault's checkbox items as structured, filterable data. Read-only —
+  # Yoyo does not tick your boxes. Needs YOYO_VAULT_PATH, same as the vault server.
+  tasks:
+    command: python
+    args: ["-m", "yoyo.mcp.tasks_server"]
+    enabled: true          # reads the same vault
+    prefix: tasks
+
+  # Calendar: Google Calendar and Microsoft 365, read-only. Shares the OAuth app
+  # registration with mail — configure accounts in yoyo-calendar.yaml and run
+  # `yoyo calendar auth <name>` before enabling.
+  calendar:
+    command: python
+    args: ["-m", "yoyo.mcp.calendar_server"]
+    enabled: false
+    prefix: cal
+
+  # Web search + fetch, via your own SearXNG. THE ONLY SERVER THAT SENDS DATA OUT and
+  # the only one that brings UNTRUSTED text back. Needs SearXNG's JSON API enabled.
+  search:
+    command: python
+    args: ["-m", "yoyo.mcp.search_server"]
+    enabled: true          # live 2026-08-15 against the owner's SearXNG on :8888
+    prefix: web
 
   # Mail: Gmail and Microsoft 365, read + draft only. Configure accounts in
   # yoyo-mail.yaml and authenticate with `yoyo mail auth <name>` before enabling.
   mail:
     command: python
     args: ["-m", "yoyo.mcp.mail_server"]
-    enabled: false
+    enabled: true          # personal Gmail live 2026-08-15. Read + draft only, no send.
     prefix: mail
 
   # Off-the-shelf example: the reference filesystem server, scoped to one folder.

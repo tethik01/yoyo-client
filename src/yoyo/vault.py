@@ -220,5 +220,103 @@ def stats() -> dict[str, object]:
         "root": str(root),
         "notes": len(notes),
         "bytes": sum(p.stat().st_size for p in notes),
-        "drafts": len(list((root / DRAFTS_DIR).glob("*.md"))) if (root / DRAFTS_DIR).is_dir() else 0,
+        "drafts": (
+            len(list((root / DRAFTS_DIR).glob("*.md")))
+            if (root / DRAFTS_DIR).is_dir()
+            else 0
+        ),
     }
+
+
+def graph(folder: str = "", limit: int = 500) -> dict[str, object]:
+    """Notes and their wikilinks, plus which notes the corpus has ingested.
+
+    The corpus overlay is the point, not decoration. A live agent turn on 2026-08-15
+    answered "your notes describe the GB10…" and cited a CORPUS document — the vault held
+    one empty file. Vault and corpus are different stores that drift, and nothing in the
+    system made that visible. This does.
+
+    Broken links are kept as nodes with `exists: false`. A wikilink to a note you have not
+    written yet is real information — Obsidian shows those too, and dropping them would
+    hide the shape of what you meant to write.
+    """
+    root = vault_root()
+    base = _resolve(folder, root) if folder else root
+    if not base.is_dir():
+        raise VaultError(f"{folder!r} is not a folder in the vault")
+
+    ingested = _ingested_stems()
+    nodes: dict[str, dict[str, object]] = {}
+    edges: list[dict[str, str]] = []
+
+    paths = sorted(_notes(base))[:limit]
+    for path in paths:
+        rel = _rel(path, root)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        nodes[path.stem.lower()] = {
+            "id": path.stem.lower(),
+            "title": path.stem,
+            "path": rel,
+            "bytes": path.stat().st_size,
+            "exists": True,
+            # Matched on stem: the corpus stores a source path that may differ from the
+            # vault-relative one, and an exact-path join would report everything as absent.
+            "in_corpus": path.stem.lower() in ingested,
+            "empty": path.stat().st_size == 0,
+        }
+
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        source = path.stem.lower()
+        for raw in {m.strip() for m in _WIKILINK.findall(text)}:
+            target = raw.lower()
+            if not target:
+                continue
+            if target not in nodes:
+                # A link to a note that does not exist yet. Obsidian shows these; so do we.
+                nodes[target] = {
+                    "id": target, "title": raw, "path": None, "bytes": 0,
+                    "exists": False, "in_corpus": False, "empty": True,
+                }
+            edges.append({"source": source, "target": target})
+
+    return {
+        "root": str(root),
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "stats": {
+            "notes": sum(1 for n in nodes.values() if n["exists"]),
+            "missing": sum(1 for n in nodes.values() if not n["exists"]),
+            "empty": sum(1 for n in nodes.values() if n["exists"] and n["empty"]),
+            "in_corpus": sum(1 for n in nodes.values() if n["in_corpus"]),
+            "links": len(edges),
+        },
+    }
+
+
+def _ingested_stems() -> set[str]:
+    """Note stems present in the corpus. Empty set if the database is unavailable —
+    the graph is still worth drawing without the overlay."""
+    try:
+        from .storage import db
+
+        with db.connection() as conn:
+            rows = conn.execute("SELECT source_path, title FROM documents").fetchall()
+    except Exception:  # noqa: BLE001
+        log.debug("corpus overlay unavailable", exc_info=True)
+        return set()
+
+    from pathlib import PurePath
+
+    out = set()
+    for row in rows:
+        for value in (row["source_path"], row["title"]):
+            if value:
+                out.add(PurePath(str(value)).stem.lower())
+    return out

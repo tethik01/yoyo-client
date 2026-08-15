@@ -102,6 +102,17 @@ def resolve(account: str | None, path: Path | None = None):  # noqa: ANN201
     """Pick an account. With one configured, naming it is optional."""
     available = providers(path)
     if not available:
+        # "No accounts configured" is the wrong diagnosis when accounts exist but are
+        # switched off — observed live right after a successful `yoyo mail auth`, which is
+        # the most confusing possible moment to be told nothing is configured. Distinguish
+        # the two: one needs a yaml block written, the other needs one word changed.
+        configured = load_accounts(path)
+        if configured:
+            names = ", ".join(s.name for s in configured)
+            raise MailError(
+                f"Mail accounts exist but are all disabled: {names}. "
+                f"Set `enabled: true` on the one you want in yoyo-mail.yaml."
+            )
         raise MailError(
             "No mail accounts configured. Add one to yoyo-mail.yaml, then: yoyo mail auth <name>"
         )

@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     qdrant_collection: str = "yoyo_corpus"
 
     api_host: str = "127.0.0.1"
-    api_port: int = 8080
+    # 8081, not 8080: 8080 is the most-collided port on a dev machine and the owner
+    # already had something on it. Override with YOYO_API_PORT.
+    api_port: int = 8081
 
     log_level: str = "INFO"
     # Server-side timeout is 900 s and agent tool loops genuinely take minutes.
