@@ -398,6 +398,66 @@ def _job_remember(ctx: JobContext) -> dict[str, Any]:
     return {"summary": report.summary()}
 
 
+@register("research")
+def _job_research(ctx: JobContext) -> dict[str, Any]:
+    """Deep research on a topic: plan, gather, read, write, save a draft.
+
+    A job rather than a request because it is minutes of work — several searches, a dozen
+    page fetches and a long write — and because the log IS the audit trail. A research
+    report that appears without showing what it read is a report you have to take on trust.
+    """
+    from . import research as research_mod
+
+    topic = str(ctx.args.get("topic", "")).strip()
+    if not topic:
+        raise JobError("research needs a topic")
+    depth = str(ctx.args.get("depth", research_mod.DEFAULT_DEPTH))
+
+    report = research_mod.run(topic, depth=depth,
+                              use_corpus=bool(ctx.args.get("corpus", True)),
+                              on_log=ctx.log)
+    ctx.check_cancelled()
+
+    if ctx.args.get("save", True):
+        try:
+            path = research_mod.save_draft(report)
+            ctx.log(f"saved draft: {path}")
+        except Exception as exc:  # noqa: BLE001 - no vault is a normal state
+            ctx.log(f"could not save a draft ({exc}) — the report is in this result")
+
+    return {
+        "topic": report.topic, "depth": report.depth, "questions": report.questions,
+        "text": report.text, "summary": report.summary(),
+        "sources": [s.as_dict() for s in report.sources],
+        "invented_links": report.invented_links,
+        "errors": report.errors, "draft_path": report.draft_path,
+        "latency_ms": report.latency_ms,
+    }
+
+
+@register("memory-sweep")
+def _job_memory_sweep(ctx: JobContext) -> dict[str, Any]:
+    """The automatic path: idle conversations become proposals, incrementally.
+
+    Queued by the scheduler rather than by a person, which is the whole point — but it runs
+    through the same job runner as everything else, so an automatic sweep has a log, a
+    duration and a visible failure. Work that happens invisibly cannot be debugged, and a
+    memory system quietly not running looks exactly like one with nothing to say.
+    """
+    from .memory import pipeline
+
+    reason = ctx.args.get("reason", "manual")
+    ctx.log(f"sweep triggered by: {reason}")
+    report = pipeline.sweep(on_log=ctx.log)
+    return {
+        "reason": reason, "considered": report.considered, "swept": report.swept,
+        "queued": report.queued, "capped": report.capped,
+        "skipped_capped": report.skipped_capped,
+        "pending": report.pending_after,
+        "failures": [list(f) for f in report.failures],
+    }
+
+
 @register("memory-propose")
 def _job_memory_propose(ctx: JobContext) -> dict[str, Any]:
     """Extract, verify, and queue for review. Writes nothing to the vault.

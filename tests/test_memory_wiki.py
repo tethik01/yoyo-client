@@ -343,8 +343,8 @@ def _fake_extraction(monkeypatch, claims):
 def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch):
     _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person",
                                     "claim": "flying to Lisbon",
-                                    "quote": "Priya is flying to Lisbon"}])
-    sources = {"conversation://1": _transcript("Priya is flying to Lisbon on the 14th.")}
+                                    "quote": "my sister Priya is flying to Lisbon"}])
+    sources = {"conversation://1": _transcript("my sister Priya is flying to Lisbon on the 14th.")}
     report = build.build(sources, root=tmp_path, dry_run=True)
 
     assert report.accepted == 1
@@ -355,7 +355,7 @@ def test_a_dry_run_leaves_the_append_only_log_untouched(tmp_path, monkeypatch):
     """The log's only value is being an accurate record. A build that never happened must
     not appear in it."""
     _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "c",
-                                    "quote": "Priya"}])
+                                    "quote": "Priya is my sister"}])
     build.build({"conversation://1": _transcript("Priya is my sister and lives nearby")},
                 root=tmp_path, dry_run=True)
     assert not (tmp_path / wiki.WIKI_DIR / wiki.LOG_FILE).exists()
@@ -366,25 +366,25 @@ def test_a_dry_run_returns_the_pages_so_the_claims_can_be_read(tmp_path, monkeyp
     quote, so the report has to carry both."""
     _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person",
                                     "claim": "flying to Lisbon",
-                                    "quote": "Priya is flying to Lisbon"}])
-    report = build.build({"conversation://1": _transcript("Priya is flying to Lisbon.")},
+                                    "quote": "my sister Priya is flying to Lisbon"}])
+    report = build.build({"conversation://1": _transcript("my sister Priya is flying to Lisbon.")},
                          root=tmp_path, dry_run=True)
     page = report.pages[0]
     assert page.subject == "Priya"
-    assert page.claims[0].quote == "Priya is flying to Lisbon"
+    assert page.claims[0].quote == "my sister Priya is flying to Lisbon"
     assert "DRY RUN" in report.summary()
 
 
 def test_a_dry_run_does_not_disturb_pages_already_on_disk(tmp_path, monkeypatch):
     _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "first",
-                                    "quote": "Priya"}])
+                                    "quote": "Priya is my sister"}])
     build.build({"conversation://1": _transcript("Priya is my sister, she lives nearby")},
                 root=tmp_path)
     page_path = next(p for p in tmp_path.rglob("*.md") if "Priya" in p.name)
     before = page_path.read_text(encoding="utf-8")
 
     _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "second",
-                                    "quote": "Priya"}])
+                                    "quote": "Priya is my sister"}])
     build.build({"conversation://2": _transcript("Priya is my sister, she lives nearby")},
                 root=tmp_path, dry_run=True)
     assert page_path.read_text(encoding="utf-8") == before
@@ -393,7 +393,7 @@ def test_a_dry_run_does_not_disturb_pages_already_on_disk(tmp_path, monkeypatch)
 def test_a_real_run_still_writes(tmp_path, monkeypatch):
     """The dry-run flag must not become the default by accident."""
     _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "c",
-                                    "quote": "Priya"}])
+                                    "quote": "Priya is my sister"}])
     build.build({"conversation://1": _transcript("Priya is my sister, she lives nearby")},
                 root=tmp_path)
     assert (tmp_path / wiki.WIKI_DIR / wiki.LOG_FILE).exists()

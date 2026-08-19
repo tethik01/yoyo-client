@@ -327,3 +327,128 @@ def test_there_is_no_approve_everything_route():
     paths = [getattr(r, "path", "") for r in api.app.routes]
     for banned in ("/memory/proposals/all", "/memory/approve-all", "/memory/proposals/approve"):
         assert banned not in paths
+
+
+# ------------------------------------------------------------- the tool guide ---
+
+
+def test_every_built_in_tool_has_a_guide_entry():
+    """The page exists because "34 tools" appeared in the corner with no way to find out
+    which 34. A tool with no entry recreates that gap one level down, so at minimum the
+    ones this project ships must be documented."""
+    from yoyo import toolguide
+    from yoyo import tools as tools_mod
+
+    missing = [n for n in tools_mod.registry.names() if toolguide.entry_for(n) is None]
+    assert not missing, f"tools with no guide entry: {missing}"
+
+
+def test_an_undocumented_tool_is_surfaced_not_hidden():
+    from yoyo import toolguide
+
+    described = toolguide.describe("some_third_party_tool")
+    assert described["documented"] is False
+    assert "Not yet documented" in described["group"]
+    assert any(g["name"] == "Not yet documented" for g in toolguide.group_order())
+
+
+def test_the_guide_matches_a_tool_whose_server_was_renamed():
+    """MCP tools arrive prefixed with their server name, and that prefix is config. Renaming
+    a server in yoyo-mcp.yaml must not silently empty the guide."""
+    from yoyo import toolguide
+
+    assert toolguide.entry_for("notes_search") is toolguide.entry_for("vault_search")
+
+
+def test_the_guide_never_invents_a_tool():
+    """The registry is the source of truth for what exists; the guide only adds prose. A
+    guide entry for a tool you do not have is the doc-drift failure this project already
+    fails a test over."""
+    from fastapi.testclient import TestClient
+
+    from yoyo import api as api_mod
+    from yoyo import tools as tools_mod
+
+    listed = {t["name"] for t in TestClient(api_mod.app).get("/tools").json()["tools"]}
+    assert listed == set(tools_mod.registry.names())
+
+
+def test_the_tools_route_reports_which_have_no_guide(client):
+    body = client.get("/tools").json()
+    assert "undocumented" in body
+    assert "groups" in body and body["groups"]
+
+
+# --------------------------------------------------- route order (live bug) ---
+
+
+def test_deciding_a_whole_subject_is_not_swallowed_by_the_id_route(client, temp_token):
+    """The bug the owner hit clicking "keep all".
+
+    FastAPI matches routes in declaration order. With `/memory/proposals/{proposal_id}`
+    declared first, a POST to `/memory/proposals/subject` was captured by the parameterised
+    route, "subject" failed to parse as an int, and the browser got a 422 whose `detail` is a
+    LIST of validation objects — rendered as "[object Object]". Specific before parameterised.
+    """
+    from yoyo.memory import review
+    from yoyo.memory.wiki import Claim
+
+    review.propose([
+        Claim(subject="Janam", kind="person", claim="is my son and in 9th grade",
+              quote="my son's name is Janam, he is in 9th grade", source="conversation://2"),
+        Claim(subject="Janam", kind="person", claim="second fact",
+              quote="my son Janam plays cricket", source="conversation://2"),
+    ])
+
+    r = client.post("/memory/proposals/subject",
+                    json={"subject": "Janam", "status": "approved"},
+                    headers={auth.TOKEN_HEADER: temp_token})
+    assert r.status_code == 200, r.text
+    assert r.json()["changed"] == 2
+    assert review.pending() == []
+
+
+def test_the_literal_route_is_declared_before_the_parameterised_one():
+    """Structural, so re-adding a route above it fails here rather than in the browser."""
+    paths = [getattr(r, "path", "") for r in api.app.routes]
+    assert paths.index("/memory/proposals/subject") < paths.index("/memory/proposals/{proposal_id}")
+
+
+def test_a_numeric_id_still_reaches_the_per_claim_route(client, temp_token):
+    """The fix must not shadow the route it was ordered ahead of."""
+    from yoyo.memory import review
+    from yoyo.memory.wiki import Claim
+
+    review.propose([Claim(subject="Bhavin", kind="person", claim="name",
+                          quote="my name is Bhavin", source="conversation://2")])
+    pid = review.pending()[0]["id"]
+    r = client.post(f"/memory/proposals/{pid}", json={"status": "approved"},
+                    headers={auth.TOKEN_HEADER: temp_token})
+    assert r.status_code == 200
+    assert r.json()["id"] == pid
+
+
+# ------------------------------------------------- stale code (the meta-bug) ---
+
+
+def test_health_reports_when_the_running_code_is_older_than_the_disk(client, monkeypatch):
+    """The bug that caused a second bug report for an already-fixed bug.
+
+    `ui()` re-reads `index.html` on every request; Python modules are imported once. Update
+    the files without restarting and the new front end talks to the old backend — which is
+    exactly how a fixed route-ordering bug kept reproducing. The server can see this, so it
+    has to say it.
+    """
+    monkeypatch.setattr(api, "LOADED_SOURCE_MTIME", 0.0)
+    assert client.get("/health").json()["stale_code"] is True
+
+
+def test_fresh_code_is_not_reported_as_stale(client, monkeypatch):
+    monkeypatch.setattr(api, "LOADED_SOURCE_MTIME", 2_000_000_000.0)
+    assert client.get("/health").json()["stale_code"] is False
+
+
+def test_a_hair_of_clock_skew_does_not_cry_wolf(monkeypatch):
+    """A banner that fires on a half-second of copy latency gets ignored like any other."""
+    monkeypatch.setattr(api, "_newest_source_mtime", lambda: api.LOADED_SOURCE_MTIME + 0.4)
+    assert api.code_is_stale() is False

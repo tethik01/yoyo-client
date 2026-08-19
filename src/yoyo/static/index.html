@@ -94,11 +94,17 @@
   .conv.active { background:var(--accent-soft); color:var(--ink); }
   .conv .label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
   .conv .when { color:var(--dim); font-size:11px; flex:none; }
+  .conv .del { flex:none; visibility:hidden; border:none; background:none; color:var(--dim);
+               padding:0 2px; font-size:13px; line-height:1; cursor:pointer; }
+  .conv:hover .del { visibility:visible; }
+  .conv .del:hover { color:var(--bad); background:none; border-color:transparent; }
 
-  .side-foot { border-top:1px solid var(--line); padding:10px 14px; font-size:12px;
-               color:var(--dim); display:flex; align-items:center; gap:7px;
+  .side-foot { border-top:1px solid var(--line); border-left:none; border-right:none;
+               border-bottom:none; border-radius:0; padding:10px 14px; font-size:12px;
+               color:var(--dim); display:flex; align-items:center; gap:7px; width:100%;
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-               cursor:default; }
+               text-align:left; background:none; cursor:pointer; }
+  .side-foot:hover { background:var(--panel-2); color:var(--ink); border-color:transparent; }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); flex:none; }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
 
@@ -204,6 +210,42 @@
   form#ask input { flex:1; padding:11px 14px; font-size:14.5px; }
 
   /* --------------------------------------------------------------- memory --- */
+  .sweep { margin-top:12px; font-size:12.5px; color:var(--dim);
+           display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .sweep .pill { padding:2px 9px; border-radius:999px; border:1px solid var(--line);
+                 font-size:11px; font-weight:700; text-transform:uppercase;
+                 letter-spacing:.05em; }
+  .sweep .pill.on { color:var(--ok); border-color:var(--ok); }
+  .sweep .pill.off { color:var(--warn); border-color:var(--warn); }
+  .sweep .pill.capped { color:var(--bad); border-color:var(--bad); }
+
+  .conv .mute { opacity:.45; }
+  .convbar { display:flex; gap:8px; align-items:center; padding:8px 28px;
+             border-bottom:1px solid var(--line-soft); font-size:12.5px; color:var(--dim); }
+  .convbar[hidden] { display:none; }
+
+  .report { white-space:pre-wrap; font-size:14px; line-height:1.6; margin-top:10px; }
+  .report a { word-break:break-all; }
+  .group-h { margin:20px 0 2px; font-size:13px; font-weight:700; letter-spacing:-.01em; }
+  .group-h:first-child { margin-top:6px; }
+  .group-b { color:var(--dim); font-size:12.5px; margin:0 0 6px; }
+  .tool-row .when { font-size:12.5px; margin:5px 0 0; }
+  .tool-row .eg { font-size:12.5px; color:var(--accent); margin:4px 0 0; font-style:italic; }
+  .tool-row .caveat { font-size:12px; color:var(--warn); margin:4px 0 0; }
+  .tool-row .undoc { font-size:12px; color:var(--dim); font-style:italic; margin-top:4px; }
+
+  .tool-row { border-bottom:1px solid var(--line-soft); padding:11px 2px; }
+  .tool-row:last-child { border-bottom:none; }
+  .tool-row .name { font-family:var(--mono); font-weight:600; font-size:13px; }
+  .tool-row .src { font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+                   padding:1px 7px; border-radius:999px; border:1px solid var(--line);
+                   color:var(--dim); margin-left:8px; }
+  .tool-row .src.own { color:var(--accent); border-color:var(--accent); }
+  .tool-row .desc { color:var(--ink-2); font-size:13px; margin:4px 0 0; }
+  .tool-row .args { margin-top:5px; font-family:var(--mono); font-size:11.5px;
+                    color:var(--dim); }
+  .tool-row .args b { color:var(--ink-2); font-weight:600; }
+
   .subject { border:1px solid var(--line); border-radius:var(--r); margin-bottom:12px;
              overflow:hidden; }
   .subject > header { display:flex; gap:10px; align-items:center; padding:10px 14px;
@@ -230,6 +272,14 @@
   /* --------------------------------------------------------------- toasts --- */
   /* Every failure lands here. The 500 that started this redesign printed a traceback into a
      console nobody was watching and left the panel blank. */
+  #staleBar { background:var(--warn); color:#1a1400; padding:9px 16px; font-size:13px;
+              text-align:center; font-weight:500; }
+  #staleBar[hidden] { display:none; }
+  #staleBar code { background:rgba(0,0,0,.14); padding:1px 5px; border-radius:4px; }
+  body:has(#staleBar:not([hidden])) .app { height:calc(100vh - 38px); }
+  body:has(#staleBar:not([hidden])) nav,
+  body:has(#staleBar:not([hidden])) main { height:calc(100vh - 38px); }
+
   #toasts { position:fixed; right:18px; bottom:18px; display:flex; flex-direction:column;
             gap:8px; z-index:50; max-width:min(440px, 90vw); }
   .toast { background:var(--panel); border:1px solid var(--line);
@@ -266,6 +316,12 @@
 </head>
 <body>
 
+<div id="staleBar" hidden>
+  <b>The server is running older code than the files on disk.</b>
+  This page reloads from disk on every request, but Python does not — restart
+  <code>yoyo serve</code> or you are looking at a new front end talking to an old backend.
+</div>
+
 <div class="app">
 <nav>
   <div class="brand">
@@ -278,13 +334,16 @@
     <button class="navlink" data-view="memory"><span class="ico">◈</span>Memory
       <span class="badge" id="memBadge" hidden>0</span></button>
     <button class="navlink" data-view="map"><span class="ico">⬡</span>Vault map</button>
+    <button class="navlink" data-view="research"><span class="ico">✦</span>Research</button>
+    <button class="navlink" data-view="tools"><span class="ico">⚙</span>Tools</button>
     <button class="navlink" data-view="health"><span class="ico">◉</span>Health</button>
   </div>
 
   <div class="side-h">Conversations <button class="tiny ghost" id="new">+ New</button></div>
   <div id="convs"></div>
 
-  <div class="side-foot" id="health"><span class="dot"></span>checking…</div>
+  <button class="side-foot" id="health" title="What Yoyo can actually do — click for the list">
+    <span class="dot"></span>checking…</button>
 </nav>
 
 <main>
@@ -296,6 +355,12 @@
   </header>
 
   <!-- ------------------------------------------------------------- chat --- -->
+  <div class="convbar" id="convBar" hidden>
+    <span id="convBarLabel"></span>
+    <button class="tiny" id="rememberToggle"></button>
+    <span class="muted" id="convBarWhy"></span>
+  </div>
+
   <div class="view" id="view-chat">
     <div id="turns"></div>
     <div id="chatEmpty">
@@ -322,9 +387,10 @@
         real run produced six pages of world history with every gate green.
         <b>Nothing is written until you approve it.</b></p>
       <div class="row">
-        <button class="primary" data-job='{"kind":"memory-propose"}'>Look for new memories</button>
+        <button class="primary" data-job='{"kind":"memory-sweep","args":{"reason":"you asked"}}'>Read new conversations now</button>
         <button id="applyMemory">Write approved pages</button>
       </div>
+      <div id="sweepStatus" class="sweep"></div>
       <div id="proposals"></div>
     </div>
   </div>
@@ -341,6 +407,63 @@
         <span><i style="background:var(--warn)"></i>empty</span>
         <span><i style="background:transparent;border:1px dashed var(--bad)"></i>linked but not written</span>
       </div>
+    </div>
+  </div>
+
+  <!-- --------------------------------------------------------- research --- -->
+  <div class="view" id="view-research" hidden>
+    <div class="card">
+      <h2>Research a topic</h2>
+      <p class="why">Plan → search → <b>read the pages</b> → write a cited report. Minutes,
+        not seconds. Every URL in the report was returned by a search or actually fetched;
+        invented ones are stripped and the removal is reported, because a references section
+        is exactly where people stop checking.</p>
+      <div class="row">
+        <label class="field" style="flex:1;min-width:280px">Topic or question
+          <input id="researchTopic" placeholder="e.g. how do local model servers handle concurrency">
+        </label>
+        <label class="field">Depth
+          <select id="researchDepth">
+            <option value="quick">quick · 2 questions</option>
+            <option value="standard" selected>standard · 4 questions</option>
+            <option value="deep">deep · 6 questions</option>
+          </select>
+        </label>
+        <button class="primary" id="runResearch">Research</button>
+      </div>
+      <p class="why" style="margin:10px 0 0"><b>This sends your questions to the web</b>
+        through your SearXNG. Every query is recorded in the egress log. It also reads your
+        own corpus first — what you already have usually beats what a search returns.</p>
+    </div>
+    <div class="card" id="reportCard" hidden>
+      <h2 id="reportTitle">Report</h2>
+      <p class="why" id="reportMeta"></p>
+      <div id="reportBody" class="report"></div>
+    </div>
+    <div class="card">
+      <h2>Past reports</h2>
+      <p class="why">Each one is a job, so the log shows exactly what was searched and read.</p>
+      <div id="reportHistory"></div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------------ tools --- -->
+  <div class="view" id="view-tools" hidden>
+    <div class="tiles" id="toolTiles"></div>
+    <div class="card">
+      <h2>What Yoyo can do</h2>
+      <p class="why">Every tool the model can reach right now, and where it came from. An
+        agent's behaviour is mostly decided by the tools in front of it — <b>"why did it not
+        search the web"</b> is unanswerable without this list, which is how a correctly
+        configured `web_search` went unnoticed for an afternoon.</p>
+      <input id="toolFilter" placeholder="Filter by name or description…" style="width:100%">
+      <div id="toolList"></div>
+    </div>
+    <div class="card">
+      <h2>MCP servers</h2>
+      <p class="why">A failed mount is why a tool you configured is missing. Read-only
+        allowlists are applied here too — a withheld tool never reaches the model.</p>
+      <div id="serverList"></div>
     </div>
   </div>
 
@@ -460,12 +583,27 @@ function toast(message, kind = "bad", title = null) {
   return el;
 }
 
+// FastAPI's own validation errors put a LIST of objects in `detail`, so the obvious
+// `body.detail` renders as "[object Object]" — which is what a real 422 showed the owner
+// instead of "subject is not a valid integer". An error message you cannot read is the same
+// failure as no error message at all, one step further along.
+function errorText(body, res) {
+  const detail = body && (body.detail ?? body.message);
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    return detail.map(d => {
+      const where = Array.isArray(d.loc) ? d.loc.filter(p => p !== "body").join(".") : "";
+      return [where, d.msg || JSON.stringify(d)].filter(Boolean).join(": ");
+    }).join("; ");
+  }
+  if (detail) return JSON.stringify(detail);
+  return `${res.status} ${res.statusText}`;
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, options);
   const body = await res.json().catch(() => null);
-  if (!res.ok) {
-    throw new Error((body && (body.detail || body.message)) || `${res.status} ${res.statusText}`);
-  }
+  if (!res.ok) throw new Error(errorText(body, res));
   return body;
 }
 
@@ -499,6 +637,10 @@ const VIEWS = {
            sub: "Claims Yoyo proposes, next to the quote each one rests on. You decide."},
   map:    {title: "Vault map",
            sub: "Your notes and their links. Yoyo's own pages are shown here, and marked."},
+  research: {title: "Research",
+             sub: "A topic in, a cited report out. Minutes of searching and reading."},
+  tools:  {title: "Tools",
+           sub: "Everything the model can reach, and which server it came from."},
   health: {title: "Health",
            sub: "Doctor, gates and measurements — with the history that makes a change visible."},
 };
@@ -514,9 +656,15 @@ function show(next) {
   $("ask").hidden = next !== "chat";
   if (next === "map") loadMap();
   if (next === "health") refreshJobs();
-  if (next === "memory") loadProposals();
+  if (next === "memory") { loadProposals(); loadSweepStatus(); }
+  if (next === "tools") loadTools();
+  if (next === "research") loadReports();
 }
 document.querySelectorAll(".navlink").forEach(b => b.onclick = () => show(b.dataset.view));
+
+// The tool count in the corner said "34 tools" for days with no way to find out which 34.
+// Making the number itself the way in is the shortest path from the question to the answer.
+$("health").onclick = () => show("tools");
 
 // An empty chat with a blinking cursor tells you nothing about what this can do. The
 // examples are the three shapes the router actually distinguishes — one source, a live
@@ -555,6 +703,9 @@ async function health() {
       tile("MCP servers",
            `${Object.values(j.mcp || {}).filter(Boolean).length}/${Object.keys(j.mcp || {}).length}`,
            failedMcp.join(", ") || "all mounted", failedMcp.length ? "bad-t" : "");
+
+    // The trap that produced a second bug report for an already-fixed bug.
+    $("staleBar").hidden = !j.stale_code;
   } catch (err) {
     $("health").innerHTML = `<span class="dot bad"></span>API unreachable`;
     $("healthTiles").innerHTML = tile("API", "unreachable", String(err.message || err), "bad-t");
@@ -638,8 +789,7 @@ $("ask").addEventListener("submit", async (e) => {
       body: JSON.stringify({question, mode, conversation_id: conversationId}),
     });
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.detail || `${res.status} ${res.statusText}`);
+      throw new Error(errorText(await res.json().catch(() => null), res));
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -726,6 +876,39 @@ $("ask").addEventListener("submit", async (e) => {
   }
 });
 
+// The switch that makes this a second brain rather than a recorder. Off means the sweep
+// stops READING this thread; it does not unsay what was already learned — that is
+// `yoyo memory forget`, which leaves a tombstone. Two different acts.
+let rememberByConv = {};
+
+function renderConvBar() {
+  const bar = $("convBar");
+  if (!conversationId) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const on = rememberByConv[conversationId] !== false;
+  $("convBarLabel").textContent = `Conversation ${conversationId}`;
+  $("rememberToggle").textContent = on ? "Remembering — click to ignore" : "Ignored — click to remember";
+  $("rememberToggle").className = "tiny " + (on ? "good" : "danger");
+  $("convBarWhy").textContent = on
+    ? "Yoyo will read this for memories once it goes quiet."
+    : "The sweep skips this thread. Anything already learned from it stays.";
+}
+
+$("rememberToggle").onclick = async () => {
+  if (!conversationId) return;
+  const next = rememberByConv[conversationId] === false;
+  try {
+    await post(`/conversations/${conversationId}/remember`, {remember: next});
+    rememberByConv[conversationId] = next;
+    renderConvBar();
+    loadConversations();
+    toast(next ? "This conversation will be read for memories."
+               : "The sweep will leave this conversation alone.", "good");
+  } catch (err) {
+    toast(String(err.message || err), "bad", "Could not change that");
+  }
+};
+
 async function loadConversations() {
   try {
     const list = await api("/conversations");
@@ -735,14 +918,54 @@ async function loadConversations() {
       return;
     }
     for (const c of list) {
+      if (c.remember !== undefined) rememberByConv[c.id] = c.remember !== 0 && c.remember !== false;
+      const ignored = rememberByConv[c.id] === false;
       const row = document.createElement("div");
       row.className = "conv" + (c.id === conversationId ? " active" : "");
-      row.innerHTML = `<span class="label">${esc(c.title || "(untitled)")}</span>`
-                    + `<span class="when">${esc(when(c.updated_at))}</span>`;
+      row.innerHTML = `<span class="label${ignored ? " mute" : ""}">${
+                          ignored ? "🚫 " : ""}${esc(c.title || "(untitled)")}</span>`
+                    + `<span class="when">${esc(when(c.updated_at))}</span>`
+                    + `<button class="del" title="Delete this conversation">✕</button>`;
       row.onclick = () => openConversation(c.id);
+      row.querySelector(".del").onclick = (e) => {
+        e.stopPropagation();
+        deleteConversation(c.id, c.title);
+      };
       $("convs").append(row);
     }
+    renderConvBar();
   } catch { /* the sidebar is not worth breaking the page over */ }
+}
+
+// Deleting is irreversible and cascades to every message, so it asks — but only once, and
+// with the title in the question. A confirm that does not say what it is deleting trains
+// you to click through it.
+//
+// It does NOT touch memory. Claims already extracted from this conversation keep their
+// source id and stay on their pages; unsaying them is `yoyo memory forget`. Silently
+// dropping memories because a transcript was tidied away would make the tombstone log a
+// poor record of what memory has contained.
+async function deleteConversation(id, title) {
+  const label = title ? `"${title}"` : `conversation ${id}`;
+  if (!confirm(`Delete ${label}? The transcript and every message in it go for good.\n\n`
+             + `Memories already extracted from it are NOT removed — use "yoyo memory forget" `
+             + `for those.`)) return;
+  try {
+    await api(`/conversations/${id}`, {
+      method: "DELETE",
+      headers: {"x-yoyo-token": TOKEN},
+    });
+    if (conversationId === id) {
+      conversationId = null;
+      $("turns").innerHTML = "";
+      $("chatEmpty").hidden = false;
+      $("convBar").hidden = true;
+    }
+    loadConversations();
+    toast(`Deleted ${label}.`, "good");
+  } catch (err) {
+    toast(String(err.message || err), "bad", "Could not delete");
+  }
 }
 
 function renderTurn({question, mode, answer, meta, tools}) {
@@ -794,11 +1017,13 @@ async function openConversation(id) {
     toast(String(err.message || err), "bad", "Could not load that conversation");
   }
   loadConversations();
+  renderConvBar();
   $("q").focus();
 }
 
 $("new").onclick = () => {
   conversationId = null;
+  $("convBar").hidden = true;
   $("turns").innerHTML = "";
   $("chatEmpty").hidden = false;
   show("chat");
@@ -966,6 +1191,7 @@ function watch(id) {
     watching.close(); watching = null;
     refreshJobs();
     if (view === "memory") loadProposals();
+    if (view === "research") loadReports();
   });
   watching.onerror = () => { if (watching) { watching.close(); watching = null; } };
 }
@@ -1053,7 +1279,180 @@ function renderBenchHistory(runs) {
       <td class="muted">${esc(r.note)}</td></tr>`).join("") + `</table>`;
 }
 
+// ------------------------------------------------------------------ tools ---
+let allTools = [];
+let toolGroups = [];
+
+async function loadTools() {
+  let data;
+  try {
+    data = await api("/tools");
+  } catch (err) {
+    $("toolList").innerHTML =
+      `<div class="empty bad-t">Could not load tools: ${esc(String(err.message || err))}</div>`;
+    return;
+  }
+  allTools = data.tools || [];
+  toolGroups = data.groups || [];
+  const servers = data.servers || {};
+  const failed = Object.entries(servers).filter(([, v]) => !v.ok);
+
+  $("toolTiles").innerHTML =
+    tile("Tools reachable", data.count, "what the model can call right now") +
+    tile("Built in", allTools.filter(t => t.source === "built-in").length, "Yoyo's own") +
+    tile("From MCP servers", allTools.filter(t => t.source !== "built-in").length,
+         `${Object.keys(servers).length} server(s) configured`) +
+    tile("Failed mounts", failed.length, failed.map(([n]) => n).join(", ") || "none",
+         failed.length ? "bad-t" : "ok-t") +
+    tile("Without a guide", (data.undocumented || []).length,
+         (data.undocumented || []).join(", ") || "all documented");
+
+  $("serverList").innerHTML = Object.keys(servers).length ? `<table class="grid">
+    <tr><th>server</th><th>state</th><th>tools</th></tr>` +
+    Object.entries(servers).map(([name, v]) => `<tr>
+      <td>${esc(name)}</td>
+      <td class="${v.ok ? (v.skipped ? "muted" : "ok-t") : "bad-t"}">${
+        v.skipped ? esc(v.skipped) : v.ok ? "mounted" : "FAILED"}</td>
+      <td class="muted">${v.error ? esc(v.error) : esc(v.tools.join(", ")) || "—"}</td>
+    </tr>`).join("") + `</table>`
+    : `<div class="empty">No MCP servers configured.</div>`;
+
+  renderTools();
+}
+
+function renderTools() {
+  const q = $("toolFilter").value.trim().toLowerCase();
+  const match = (t) => !q || [t.name, t.description, t.when, t.example]
+    .some(v => (v || "").toLowerCase().includes(q));
+  const shown = allTools.filter(match);
+  if (!shown.length) {
+    $("toolList").innerHTML = `<div class="empty">${
+      allTools.length ? "Nothing matches that filter." : "No tools are mounted."}</div>`;
+    return;
+  }
+
+  // Grouped by what you are TRYING TO DO, not by which server provides it. Nobody thinks
+  // "I need the vault MCP server"; they think "what did I write about this".
+  const out = [];
+  for (const g of toolGroups) {
+    const inGroup = shown.filter(t => t.group === g.name);
+    if (!inGroup.length) continue;
+    out.push(`<h3 class="group-h">${esc(g.name)}</h3><p class="group-b">${esc(g.blurb)}</p>`);
+    out.push(inGroup.map(t => `
+      <div class="tool-row">
+        <div><span class="name">${esc(t.name)}</span><span class="src ${
+          t.source === "built-in" ? "own" : ""}">${esc(t.source)}</span></div>
+        ${t.when ? `<p class="when">${esc(t.when)}</p>` : ""}
+        ${t.example ? `<p class="eg">Try: "${esc(t.example)}"</p>` : ""}
+        ${t.caveat ? `<p class="caveat">⚠ ${esc(t.caveat)}</p>` : ""}
+        ${!t.documented ? `<p class="undoc">No guide entry written for this one yet — it is
+          shown rather than hidden, because an undocumented tool you cannot see is the gap
+          this page exists to close.</p>
+          <p class="desc">${esc(t.description || "")}</p>` : ""}
+        ${t.parameters.length ? `<div class="args">${t.parameters.map(pm =>
+          `<b>${esc(pm.name)}</b>: ${esc(pm.type)}${pm.required ? " (required)" : ""}${
+            pm.description ? " — " + esc(pm.description) : ""}`).join("<br>")}</div>` : ""}
+      </div>`).join(""));
+  }
+  $("toolList").innerHTML = out.join("");
+}
+
+$("toolFilter").oninput = renderTools;
+
+// --------------------------------------------------------------- research ---
+
+$("runResearch").onclick = (e) => {
+  const topic = $("researchTopic").value.trim();
+  if (!topic) { toast("Give it a topic first.", "warn"); return; }
+  runJob("research", {topic, depth: $("researchDepth").value}, e.currentTarget);
+};
+
+async function loadReports() {
+  let rows = [];
+  try {
+    rows = (await api("/jobs?limit=20&kind=research")).jobs || [];
+  } catch (err) {
+    $("reportHistory").innerHTML =
+      `<div class="empty bad-t">Could not load reports: ${esc(String(err.message || err))}</div>`;
+    return;
+  }
+  const done = rows.filter(j => j.status === "done" && j.result);
+  $("reportHistory").innerHTML = rows.length ? `<table class="grid">
+    <tr><th>topic</th><th>depth</th><th>status</th><th>when</th><th></th></tr>` +
+    rows.map(j => `<tr>
+      <td>${esc((j.args || {}).topic || "—")}</td>
+      <td class="muted">${esc((j.args || {}).depth || "")}</td>
+      <td class="${j.status === "failed" ? "bad-t" : j.status === "done" ? "ok-t" : "muted"}">${
+        ["queued", "running"].includes(j.status) ? '<span class="spin"></span> ' : ""}${esc(j.status)}</td>
+      <td class="muted">${esc(when(j.finished_at || j.created_at))}</td>
+      <td>${j.result ? `<button class="tiny" data-report="${j.id}">open</button>` : ""}
+          <button class="tiny" data-watch2="${j.id}">log</button></td>
+    </tr>`).join("") + `</table>`
+    : `<div class="empty">No research yet.</div>`;
+
+  $("reportHistory").querySelectorAll("[data-report]").forEach(b => b.onclick = () => {
+    const job = rows.find(j => String(j.id) === b.dataset.report);
+    if (job) showReport(job.result);
+  });
+  $("reportHistory").querySelectorAll("[data-watch2]").forEach(b => b.onclick = () => {
+    show("health");
+    watch(Number(b.dataset.watch2));
+  });
+
+  if (done.length) showReport(done[0].result);
+}
+
+function showReport(r) {
+  if (!r) return;
+  $("reportCard").hidden = false;
+  $("reportTitle").textContent = r.topic || "Report";
+  const bits = [esc(r.summary || "")];
+  if (r.draft_path) bits.push(`saved to <b>${esc(r.draft_path)}</b>`);
+  if ((r.invented_links || []).length) {
+    // Surfaced, never swallowed. A report whose model invented a source is a report you
+    // should read differently.
+    bits.push(`<span class="bad-t">${r.invented_links.length} invented link(s) removed:
+      ${esc(r.invented_links.join(", "))}</span>`);
+  }
+  if ((r.errors || []).length) bits.push(`<span class="muted">${r.errors.length} source(s)
+    could not be read</span>`);
+  $("reportMeta").innerHTML = bits.join(" · ");
+
+  // Only URLs the report actually contains become links — the same provenance rule as the
+  // rest of the system, applied at render time as well as at generation time.
+  $("reportBody").innerHTML = esc(r.text || "")
+    .replace(/(https?:\/\/[^\s<)]+)/g, '<a href="$1" target="_blank" rel="noreferrer">$1</a>');
+}
+
 // ----------------------------------------------------------------- memory ---
+
+// Whether the sweep is running, when it last ran, and what it is waiting on. Background work
+// you cannot see is background work you cannot trust — and a memory system quietly not
+// running looks exactly like one with nothing to say.
+async function loadSweepStatus() {
+  try {
+    const st = await api("/memory/status");
+    const cfg = st.config || {};
+    const bits = [];
+    bits.push(cfg.enabled
+      ? `<span class="pill on">sweeping</span>`
+      : `<span class="pill off">paused</span>`);
+    if (st.capped) bits.push(`<span class="pill capped">queue full</span>`);
+    bits.push(`<span>reads a conversation ${esc(String(cfg.idle_minutes))} min after you
+      stop typing, plus a nightly pass at ${String(cfg.nightly_hour).padStart(2, "0")}:00.</span>`);
+    bits.push(`<span>last sweep ${esc(when(st.last_sweep) || "never")} ·
+      ${st.waiting} waiting · ${st.conversations_ignored} ignored</span>`);
+    if (st.capped) {
+      bits.push(`<span class="bad-t">Clear some of the queue and it resumes exactly where it
+        stopped — nothing is lost.</span>`);
+    }
+    $("sweepStatus").innerHTML = bits.join(" ");
+  } catch (err) {
+    $("sweepStatus").innerHTML = `<span class="bad-t">Could not read sweep status: ${
+      esc(String(err.message || err))}</span>`;
+  }
+}
+
 async function loadProposals() {
   let data;
   try {
@@ -1151,6 +1550,9 @@ health();
 loadConversations();
 loadProposals();          // populates the sidebar badge even while the tab is closed
 setInterval(health, 60000);
+// The sweep runs on its own, so the badge has to notice work arriving while you are on
+// another tab. Cheap: two indexed queries.
+setInterval(() => { loadProposals(); if (view === "memory") loadSweepStatus(); }, 90000);
 </script>
 </body>
 </html>

@@ -188,7 +188,16 @@ def extract_and_verify(
     verified = wiki.verify(proposed, evidence)
     for claim, why in verified.rejected:
         log.info("rejected claim about %r: %s", claim.subject, why)
-    return verified.accepted, [(c.subject or "?", why) for c, why in verified.rejected]
+
+    # Verification answers "did the model read this". Salience answers "is it about your
+    # life" — the question the six pages of world history passed every gate without ever
+    # being asked. Mechanical, and every drop is reported rather than swallowed.
+    from . import salience
+
+    kept, dropped = salience.filter_claims(verified.accepted)
+    rejected = [(c.subject or "?", why) for c, why in verified.rejected]
+    rejected += [(c.subject or "?", why) for c, why in dropped]
+    return kept, rejected
 
 
 def propose_for_review(sources: dict[str, str], role: str = "extract") -> dict[str, Any]:
@@ -275,30 +284,18 @@ def build(
     root = root or vault_mod.vault_root()
     report = BuildReport(sources=len(sources), dry_run=dry_run)
 
-    # A memory must quote something the OWNER said. Yoyo's half of a transcript is dropped
-    # before extraction ever sees it — see `evidence_from()` for what this cost to learn.
-    evidence = {sid: evidence_from(sid, text) for sid, text in sources.items()}
+    # ONE reading path, shared with the review queue. Two would eventually disagree about
+    # what counts as evidence, and the disagreement would be invisible until a claim that
+    # the queue refused turned up on a page.
+    accepted, rejected = extract_and_verify(sources, role=role)
+    report.accepted = len(accepted)
+    report.rejected = rejected
+    report.proposed = len(accepted) + len(rejected)
 
-    proposed: list[Claim] = []
-    for source_id, text in evidence.items():
-        if not text.strip():
-            continue
-        proposed.extend(extract.from_source(source_id, text, role=role))
-    report.proposed = len(proposed)
-
-    # Verified against the SAME text extraction saw. Verifying against the full transcript
-    # would re-open the hole: a quote of Yoyo would pass the check while being exactly the
-    # thing the split is there to exclude.
-    verified = wiki.verify(proposed, evidence)
-    report.accepted = len(verified.accepted)
-    report.rejected = [(c.subject or "?", why) for c, why in verified.rejected]
-    for claim, why in verified.rejected:
-        log.info("rejected claim about %r: %s", claim.subject, why)
-
-    report.ambiguities = find_ambiguities(verified.accepted, aliases or {})
+    report.ambiguities = find_ambiguities(accepted, aliases or {})
 
     existing = load_pages(root)
-    pages = wiki.group(verified.accepted)
+    pages = wiki.group(accepted)
     for page in pages:
         prior = existing.get((page.kind, page.subject.lower()))
         if prior:

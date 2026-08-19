@@ -1,0 +1,39 @@
+# Continuous memory — when Yoyo reads your conversations, and what stops it.
+#
+# The pipeline is: conversation -> extract -> REVIEW QUEUE -> you decide -> page.
+# Nothing here can skip the review. These settings control the pace of the first arrow
+# and nothing about the third.
+#
+# ┌─ THE SETTING THAT MATTERS ───────────────────────────────────────────────────┐
+# │ `queue_cap`. Compute is not the constraint on this system — your attention   │
+# │ is. If the sweep proposes faster than you review, the queue grows without    │
+# │ bound, and a queue you cannot clear gets rubber-stamped. A rubber-stamped    │
+# │ review is WORSE than no review: it launders the same output while looking    │
+# │ careful. At the cap the sweep stops and says so, and no watermark advances,  │
+# │ so it resumes exactly where it paused.                                       │
+# │                                                                              │
+# │ Start low. Raise it only once the approval rate on the Memory tab says       │
+# │ extraction is producing things worth keeping.                                │
+# └──────────────────────────────────────────────────────────────────────────────┘
+
+memory:
+  # Master switch for automatic sweeping. `yoyo memory sweep` still works by hand.
+  enabled: true
+
+  # A conversation is "finished enough" once it has been quiet this long. Extracting after
+  # every turn would re-read a half-formed thread and propose its own drafts as facts.
+  idle_minutes: 10
+
+  # Stop proposing at this many claims awaiting your decision. See the box above.
+  queue_cap: 25
+
+  # Nightly catch-up, local time, 24h clock. Covers the evenings the laptop was shut and the
+  # hours MyAIServer was unreachable — the idle trigger only fires while the server is up.
+  nightly_hour: 3
+
+  # How often the scheduler looks for idle conversations. One SQLite query; cheap.
+  poll_seconds: 300
+
+  # Write the page the moment you approve a claim. Approving IS the judgement; writing is
+  # bookkeeping, and a second button adds a step without adding a decision.
+  auto_apply: true

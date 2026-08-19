@@ -9,7 +9,7 @@ describes; if it disagrees with the code, the file is the bug.
 - **Last updated:** 2026-08-15 (day 3, later)
 - **Phase:** Phase 0 complete. Orchestration settled (ADR-026/027). Gmail live. All five
   second-brain phases built (ADR-030) — **none of them exercised on real material yet.**
-- **Tests:** 791 passing
+- **Tests:** 865 passing
 - **Only gate on a real corpus:** OQ4 — the disk is not encrypted
 
 **Start here if you just want to USE it:** [`USER-GUIDE.md`](USER-GUIDE.md) — the three
@@ -226,12 +226,14 @@ re-comparing once `think: false` is set on the server.
 | Hybrid retrieval + RRF | ✅ | `rag/retrieve.py` |
 | Turn loop with citations | ✅ | `core.py` |
 | HTTP API + streaming | ✅ | `api.py` — `/ask/stream` covered against a mocked model |
-| Web UI | ✅ | `static/index.html` — four views, toasts on every failure, **browser smoke test** in `tests/ui/` |
+| Web UI | ✅ | `static/index.html` — six views (chat, memory, map, research, tools, health) (chat, memory, map, tools, health), toasts on every failure, **browser smoke test** in `tests/ui/` |
 | UI write boundary (token + Origin) | ✅ | `auth.py` — loopback is not a security boundary; see §9 |
 | Job runner (long work, survives reload) | ✅ | `jobs.py`, `/jobs*` — doctor, eval, bench, ingest, remember, memory-build (dry run), backup |
 | Conversation memory | ✅ | agent and graph turns persisted; follow-ups replay prior turns |
 | Memory Phase 1 — conversations as raw sources | ✅ | `memory/sources.py`, `yoyo remember` |
 | Memory review queue (propose → decide → apply) | ✅ | `memory/review.py` — the gates prove traceable, you decide worth keeping |
+| Continuous memory — automatic sweeps | ✅ | `memory/pipeline.py`, `scheduler.py` — idle + nightly, incremental by watermark, capped by the review queue |
+| Per-conversation "don't remember" | ✅ | `conversations.remember`, toggle in the chat bar |
 | Memory Phase 2 — wiki layer | 🟡 | `memory/wiki.py`, `memory/extract.py` — verbatim-quote + source-kind gates |
 | Memory Phase 3 — identity | 🟡 | aliases asked not guessed; enriches your own note in a marked block |
 | Memory Phase 4 — contradictions | 🟡 | recorded as edges, never resolved; `yoyo memory forget` |
@@ -240,7 +242,7 @@ re-comparing once `think: false` is set on the server.
 | Memory Phase 5 — voice-first routing | 🟡 | `router.py` + `voice/speech.py` — `yoyo do`, `yoyo talk --mode auto`; engines still uninstalled |
 | Vault map (UI) | 🟡 | `/vault/graph` + hand-rolled force layout — corpus overlay, broken links kept |
 | Citation resolution endpoint | ✅ | `/citation/<id>` — chunks, mail and notes through one route |
-| CLI (52 commands) | ✅ | `cli.py` — documented in §6 |
+| CLI (56 commands) | ✅ | `cli.py` — documented in §6 |
 | Backup / restore drill | ✅ | `backup.py` — 11/11 on the real drive |
 | Tool registry, 4 built-ins | ✅ | `tools.py` |
 | Bounded agent loop | ✅ | `agent.py` — iteration + wall-clock budgets |
@@ -256,6 +258,8 @@ re-comparing once `think: false` is set on the server.
 | Tasks MCP over the vault | 🟡 | `tasks.py`, `mcp/tasks_server.py` — no credentials needed |
 | Filesystem MCP (third-party) | 🟡 | `yoyo-mcp.yaml` — read-only by allowlist, scoped to `Notes` |
 | MCP tool allow/deny filtering | ✅ | `mcp/client.py::ServerSpec.permits` |
+| Deep research (`yoyo research`, Research tab) | ✅ | `research.py` — plan → search → read → cited report, drafts-only |
+| Tool guide (UI) | ✅ | `toolguide.py` + `/tools` — grouped by intent, undocumented tools shown not hidden |
 | Web search + fetch (SearXNG) | 🟡 | `websearch.py`, `mcp/search_server.py` — SSRF gate, untrusted-content framing |
 | Egress logging | ✅ | `data/egress.jsonl` — partial answer to OQ5 |
 | STT — faster-whisper, local | 🟡 | `voice/whisper.py` — needs `pip install -e ".[voice]"` |
@@ -468,6 +472,7 @@ what it picked.
 | `yoyo agent "q"` | **Tool-calling loop.** The model chooses tools (corpus search, vault, mail, clock) and iterates until it can answer. Bounded: 8 iterations and 600 s by default, `--max-iterations N` to change. Mounts MCP servers from `yoyo-mcp.yaml` unless `--no-mcp`. Prints every tool call with ok/err so you can see the reasoning path. Use when the answer needs a live lookup, or several. |
 | `yoyo do "q"` | **Routes for you.** Picks `ask`, `agent` or `plan`, prints the choice and the reason above the answer, then runs it. `--mode ask\|agent\|plan` overrides outright (no classifier call); `--rules-only` skips the classifier and uses the deterministic rules alone; `--conversation <id>` continues a thread. Say `plan: …` or "use ask mode" in the question itself and that wins. |
 | `yoyo route "q"` | Shows how a question **would** be routed — mode, reason, rules floor, signals — without answering it. A misrouted answer and a bad answer look identical from outside; this separates them. |
+| `yoyo research "topic"` | **Deep research.** Plans sub-questions, searches, **reads the pages**, and writes a cited report into `yoyo-drafts/`. `--depth quick\|standard\|deep`, `--no-corpus` to skip your own documents, `--no-save` to print without writing. Minutes, not seconds. Every URL was returned by a search or fetched; invented ones are stripped and the removal is reported. |
 | `yoyo plan "q"` | **Multi-agent research.** A planner decomposes the question, workers run **in parallel** with their own tool budgets, a synthesiser assembles the answer. `--max-subtasks N` (default 4), `--max-parallel N` (default 3). Prints the plan and its reasoning before the answer. Use for questions spanning different sources. |
 
 **Which one?** (ADR-026, four measured rounds)
@@ -653,7 +658,10 @@ like a network fault.
 | Command | What it does |
 |---|---|
 | `yoyo remember` | **Phase 1.** Past conversations become searchable, verbatim. Interprets nothing. |
-| `yoyo memory propose` | **Extract and queue for review.** Writes nothing. This is the normal path. |
+| `yoyo memory sweep` | **Read every idle conversation Yoyo has not read yet.** What the scheduler runs by itself every few minutes; run it by hand to catch up or to watch what it does. |
+| `yoyo memory status` | What continuous memory has done and what it is waiting on — last sweep, conversations read, how many are queued behind the cap. |
+| `yoyo memory ignore <id>` | Tell the sweep to leave one conversation alone. `--undo` to reverse. **Not** forgetting: it stops future reading and leaves what was already learned. |
+| `yoyo memory propose` | Extract and queue for review, ignoring the watermark. The manual equivalent of a sweep. |
 | `yoyo memory review` | The claims waiting on you, each with the quote it rests on. |
 | `yoyo memory decide <id>` | Approve one, or `--reject` it. **Rejection is permanent** — a rejected claim is never re-proposed, because a queue that re-asks becomes a treadmill and a treadmill gets rubber-stamped. |
 | `yoyo memory apply` | Write the approved claims. **The only path from a proposal to a page.** Refuses on an unencrypted disk (`--force` for throwaway content). |
@@ -661,6 +669,13 @@ like a network fault.
 | `yoyo memory build --dry-run` | **Everything except writing.** Extracts, verifies every quote, reconciles against what is on disk, and prints each proposed claim next to the quote it rests on. No page, no index, no log line. This is how you answer *"is the extraction any good"* without putting pages about your family in your vault to find out — and it is exempt from the encryption gate, because blocking the one command that lets you inspect memory would push you toward running the real thing instead. |
 | `yoyo memory show [subject]` | List memory pages, or read one with its sources and quotes. |
 | `yoyo memory forget <subject>` | Really deletes. `--containing` for specific claims. |
+
+**Two filters decide what reaches the queue, and they answer different questions.**
+Verification asks *did the model read this* — verbatim quote, real source, never a wiki page.
+Salience (`memory/salience.py`) asks *is this about your life*: a question is not a fact,
+anything about Yoyo is not a memory, and a claim needs either first-person wording or a
+subject memory already knows. Every drop is logged with its reason, because a filter that
+eats claims silently looks exactly like an extractor that finds nothing.
 
 Three layers, following the pattern the owner chose ([Karpathy's gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)):
 **raw sources** (immutable) → **the wiki** (Yoyo-written) → **the schema** (governance,
@@ -799,6 +814,7 @@ the first `ask` of the day is usually the box swapping a model in, not a fault.
 | `yoyo-mail.yaml` | mail accounts and providers |
 | `yoyo-calendar.yaml` | calendar accounts — **same OAuth app as mail** |
 | `yoyo-voice.yaml` | STT/TTS engines, model size, microphone |
+| `yoyo-memory.yaml` | **When Yoyo reads your conversations** — idle trigger, nightly pass, and the queue cap |
 | `yoyo-search.yaml` | SearXNG endpoint, fetch limits, egress logging |
 | `docker-compose.yml` | Qdrant + Open WebUI, loopback only |
 | `secrets/` | OAuth client secrets — gitignored |
@@ -872,13 +888,13 @@ Breaking these is a bug, not a style choice.
 ## 10. Tests
 
 ```powershell
-pytest -q          # 791 passing
+pytest -q          # 865 passing
 ruff check src tests
 ```
 
 | Area | Tests | Covers |
 |---|---|---|
-| Doctor / CLI | 91 | every command renders its help; **an unencrypted disk fails doctor, and `remember` / `memory build` refuse to run on one**; an unreadable BitLocker status says how to get a real answer instead of shrugging; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
+| Doctor / CLI | 95 | every command renders its help; **an unencrypted disk fails doctor, and `remember` / `memory build` refuse to run on one**; an unreadable BitLocker status says how to get a real answer instead of shrugging; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
 | Tasks | 50 | every checkbox flavour, four due-date dialects, completion-date-is-not-a-due-date, drafts excluded, **structural proof nothing can tick a box** |
 | Eval harness | 47 | fidelity gate catches a fabricating model, retry gate fails give-up-after-one-error, abstention both directions, `--role` override reaches every runner, **memory extraction gated on verbatim quotes and on abstaining from a source with no facts** |
 | Calendar | 39 | ISO offsets incl. Graph's 7-digit fractions, local day bounds, conflict maths (back-to-back is not a clash), declined/cancelled exclusion, **structural proof of no write path and read-only scopes** |
@@ -903,7 +919,10 @@ ruff check src tests
 | Memory (raw sources) | 15 | verbatim transcripts, speaker labels, trivial turns skipped, **structural proof the raw layer never calls a model** |
 | Intent router | 22 | **uncertainty escalates, never downgrades** — the classifier cannot route below the deterministic floor; overrides call no model; a dead classifier degrades to rules, not to an exception |
 | Spoken answers (speech) | 13 | citations counted not recited, code announced not spelled out, truncation says so, **structural proof shaping only deletes and never invents words** |
-| Jobs + UI auth | 28 | **`/memory/apply` is the only route that writes a page** and there is no approve-everything route; **a POST without the token is refused** and reads stay open; a foreign Origin is rejected even with a token; a failing job is a status not a crash; a reattaching client replays what it missed; **no job kind is destructive** and memory-build from the UI is dry-run only |
+| Jobs + UI auth | 39 | **`/health` reports when the running code is older than the disk**; **the literal route is declared before the parameterised one** — `/memory/proposals/subject` was being parsed as an id; **`/memory/apply` is the only route that writes a page** and there is no approve-everything route; **a POST without the token is refused** and reads stay open; a foreign Origin is rejected even with a token; a failing job is a status not a crash; a reattaching client replays what it missed; **no job kind is destructive** and memory-build from the UI is dry-run only |
+| Research | 16 | **an invented URL is stripped and reported** — the highest-stakes place in this system for a fake source; a dead search says it failed to *gather* rather than implying the topic was empty; sources are interleaved so later questions are not crowded out; reports are drafts, never canon |
+| Memory salience | 20 | **all six world-history claims from the live run are dropped**, verbatim as fixtures; a question is not a fact; a known subject no longer needs a possessive; **every drop carries a reason**; the filter calls no model |
+| Continuous memory | 23 | **the watermark never loses a slice** when extraction fails; the queue cap pauses rather than drops; an ignored conversation is never read; **the sweep has no path to a write**; the nightly pass fires once a day, not once a tick |
 | Retrieval | 6 | RRF ranking, context budget, citations |
 
 **Not covered — assume broken until exercised:** every mail and calendar **network** path
@@ -1024,6 +1043,13 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-15 | **The dry run earned its keep on the first use.** Six pages of world history, every gate green — see §1. Memory now extracts from **the owner's turns only**: `build.evidence_from()` strips the assistant's half of a transcript before extraction, and verification runs against that same text, so a claim quoting Yoyo cannot pass. The eval runner applies the identical split, because a gate that tests a path production does not take is how this got through in the first place. Extraction's prompt gained the rule the shape of the failure taught: *if a fact would be equally true for a stranger, it says nothing about its owner.* |
 | 2026-08-15 | **`yoyo memory build --dry-run`.** Extracts, verifies, reconciles and prints every proposed claim next to its quote — writing no page, no index and above all no log line, since the append-only log's only value is being an accurate record. It exists because the open question about memory is not "does it work" but "is what it extracts worth keeping", and that cannot be answered by a count. Caught by the same review: the README had been telling the owner to run `--dry-run` for two days before the flag existed, so the README guard now checks **flags**, not just command names. |
 | 2026-08-15 | **The encryption gate was not gating.** On the owner's machine the BitLocker probe returns `Get-CimInstance : Access denied` — reading volume status is a privileged API, so an ordinary PowerShell gets UNKNOWN every time, and UNKNOWN was treated as "carry on". The refusal branch had never once fired on the machine it was written for. No cleverer probe exists; the honest fix is to say so, so doctor's detail now names elevation as the way to get a real answer and `remember` / `memory build` print "could not confirm this disk is encrypted" before proceeding. Silence and a clean bill of health must not look the same. |
+| 2026-08-15 | **A third bug, caused by the fix for the second.** The owner reported "keep all" still failing after the route-ordering fix shipped — and it was: `api.ui()` re-reads `index.html` from disk on **every request**, while Python modules are imported once. He got the new front end (with its now-readable error message, which is how we could see the request was still hitting the wrong route) talking to the old backend. Nothing was wrong with the fix; the server had not been restarted, and nothing told him so. `/health` now compares the newest `.py` mtime on disk against what the process loaded, and the UI shows a persistent banner when they disagree. A system that can see it is running stale code has no excuse for letting you debug around it. |
+| 2026-08-15 | **Two bugs from one click on "keep all", found by the owner.** FastAPI matches routes in declaration order, so `POST /memory/proposals/subject` was captured by `/memory/proposals/{proposal_id}`, "subject" failed to parse as an int, and the request 422'd. The *second* bug is why that was hard to read: FastAPI's validation errors put a LIST of objects in `detail`, and the UI's `body.detail` rendered it as **"[object Object]"** — an error message you cannot read is the same failure as no error message, one step further along. Fixed both, plus a structural test that a route re-added above the literal one fails in CI rather than in the browser. |
+| 2026-08-15 | **`yoyo research` — a topic in, a cited report out.** Plan sub-questions, search, **actually read the top pages**, write a report with a sources section assembled by code rather than by the model. It fans out across sub-questions, which is a design that would have been pointless a day earlier: `coder` was recorded as serialising at 1.09x and re-measured at 3.75x. Provenance is enforced hardest here — a research report is the highest-stakes place in this system for an invented source, because a page of confident prose with a references section is exactly the shape people stop checking. Reports land in `yoyo-drafts/`, never in the vault proper. |
+| 2026-08-15 | **The Tools page became a guide.** A tool's `description` is written for the model — terse, imperative — and tells a person nothing about when to reach for it or what it will refuse. `toolguide.py` adds curated copy grouped by *what you are trying to do* rather than by which server provides it, with an example you could actually say and the caveat that matters (`vault_search` cannot see Yoyo's own pages; `mail_draft` has no send path; `web_fetch` refuses private addresses after DNS resolution). A tool with no entry is shown as **undocumented rather than hidden** — silently omitting it would recreate, one level down, the exact gap the page exists to close. |
+| 2026-08-15 | **Memory became continuous.** A watermark per conversation (`messages.id` is monotonic, so "read up to N" is the whole state) makes sweeps incremental; a scheduler thread queues one when a conversation has been quiet ten minutes, plus a nightly catch-up for the evenings the laptop was shut. The brake that matters is the **queue cap**: compute is not the constraint, attention is, and a queue you cannot clear gets rubber-stamped. At the cap the sweep pauses and says so, advancing no watermark, so clearing the queue resumes it exactly where it stopped. Approving now writes the page immediately — approval is the judgement, writing is bookkeeping — and any conversation can be told **"don't remember this"**, which stops future reading without unsaying what was already learned. |
+| 2026-08-15 | **A salience filter, built from the run that needed it.** The six world-history claims are now regression fixtures. Four mechanical rules: a question is not a fact, anything about Yoyo is not a memory, a claim needs first-person wording or a subject memory already knows, and a two-word quote is not evidence. No second model call — a model judging its own output is one more thing to distrust — and every drop carries a reason, because silent filtering and an empty extractor look identical from outside. |
+| 2026-08-15 | **A Tools page, and conversations can be deleted.** The health pill had read "34 tools" for days with no way to see which 34 — the same complaint as an uncitable answer, and exactly how a correctly configured `web_search` went unnoticed for an afternoon. Clicking the count now opens the list, with each tool's description, arguments, and which MCP server it came from, plus a table of mounts and their failures. |
 | 2026-08-15 | **The UI failed silently, and now cannot.** Clicking "Run doctor" returned a 500 — `no such table: jobs`, because `yoyo migrate` had not been run — and the page showed *nothing*. Three fixes, in order of how much they matter: the API **applies pending migrations at startup** (a schema the code needs is not a decision to delegate to someone who is trying to do something else); every unhandled error returns JSON with a message instead of an HTML 500; and the UI raises a **toast** for every failure. Then the redesign: sidebar navigation, stat tiles, per-view empty states that distinguish "nothing here" from "could not load", light and dark, and a **browser smoke test** — the UI was the only part of this project with no test, which is exactly why this one got through. |
 | 2026-08-15 | **The review queue, and the hole it closed on the way.** `vault.py` excluded `yoyo-drafts/` from search but not `yoyo-memory/` — so while extraction had always refused to *read* a wiki page as a source, `vault_search` could still find one and hand it to the model as "your notes". The same circularity through the other door, and worse: at write time a bad quote fails a check, at read time the quote is genuinely there and nothing mechanical could catch it. Memory pages are now invisible to search and still visible on the map, because drawing a node is not citing it. Then the queue itself: extract → propose → you decide → apply, with `/memory/apply` the single write path, rejection permanent (a re-asking queue is a treadmill, and a treadmill gets rubber-stamped), and the **approval rate** surfaced as the metric that says whether review is working at all. |
 | 2026-08-15 | **The UI can run things now** — a job runner (`jobs.py`, `/jobs*`) plus a Health tab. Doctor, eval, bench, ingest, remember, dry-run memory build and backup are jobs: rows in SQLite that survive a reload, replay their log to a reattaching client, and record the *arguments* next to the result. That last part is the direct lesson of the 1.09x → 3.75x reversal — a bench row now carries the host state it was taken on, because a measurement without its inputs is an anecdote. Eval history is per-case across runs, so a gate that flips is visible rather than a thing you notice three days later. |

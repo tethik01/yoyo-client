@@ -20,6 +20,7 @@ from . import auth, core, doctor, jobs, router
 from .config import get_settings
 from .mcp import client as mcp_client
 from .rag import retrieve as rag
+from .scheduler import scheduler
 from .storage import db
 
 log = logging.getLogger(__name__)
@@ -58,10 +59,48 @@ async def lifespan(_app: FastAPI):  # noqa: ANN202
         else:
             log.warning("MCP server %s failed to mount: %s", name, outcome["error"])
     app.state.mcp = report
+
+    # The clock that makes memory continuous. Started here so it lives exactly as long as
+    # the server does — see scheduler.py for why a thread rather than Task Scheduler.
+    try:
+        scheduler.start()
+    except Exception:  # noqa: BLE001 - a failed scheduler must not stop the API
+        log.exception("could not start the memory scheduler")
+
     try:
         yield
     finally:
+        scheduler.stop()
         mcp_client.unmount_all()
+
+
+def _newest_source_mtime() -> float:
+    """The newest .py in the package, as a timestamp.
+
+    Recorded at import and compared on every /health. The reason is a bug report I caused:
+    `ui()` re-reads `index.html` from disk on EVERY request, while Python modules are
+    imported once. Update the files without restarting and you get the new front end talking
+    to the old server — which is exactly what happened after a route-ordering fix, producing
+    a second bug report for a bug that was already fixed.
+
+    Cheap enough to run per health check: a few dozen stat() calls on a local disk.
+    """
+    try:
+        return max(f.stat().st_mtime for f in Path(__file__).parent.rglob("*.py"))
+    except (OSError, ValueError):
+        return 0.0
+
+
+#: Captured at import — i.e. what this process actually loaded.
+LOADED_SOURCE_MTIME = _newest_source_mtime()
+
+
+def code_is_stale() -> bool:
+    """True when the files on disk are newer than the code this process is running."""
+    newest = _newest_source_mtime()
+    # A second of slack: copying a file can land its mtime a hair after the import that
+    # read it, and a banner that cries wolf gets ignored like any other.
+    return newest > LOADED_SOURCE_MTIME + 1.0
 
 
 app = FastAPI(title="Yoyo", version="0.1.0", lifespan=lifespan)
@@ -153,6 +192,9 @@ def health() -> dict[str, object]:
     summary["mcp"] = {
         name: outcome["ok"] for name, outcome in getattr(app.state, "mcp", {}).items()
     }
+    # The UI is re-read from disk on every request; Python is not. Saying so is the
+    # difference between "that bug is fixed" and a second bug report for the same bug.
+    summary["stale_code"] = code_is_stale()
     return summary
 
 
@@ -525,17 +567,16 @@ def memory_proposals(limit: int = 200) -> dict[str, object]:
     return {"pending": review.pending(limit=limit), "stats": review.stats()}
 
 
-@app.post("/memory/proposals/{proposal_id}")
-def decide_proposal(proposal_id: int, req: DecisionRequest) -> dict[str, object]:
-    from .memory import review
-
-    changed = review.decide(proposal_id, req.status, req.note)
-    if not changed:
-        # Already decided. Not a 404 and not a 500: a second click on a stale page is a
-        # normal thing to do, and the honest answer is "nothing changed".
-        raise HTTPException(409, f"proposal {proposal_id} was already decided")
-    return {"id": proposal_id, "status": req.status}
-
+# ORDER MATTERS HERE, and it cost a live bug.
+#
+# FastAPI matches routes in declaration order. With `/memory/proposals/{proposal_id}` first,
+# a POST to `/memory/proposals/subject` was matched by the parameterised route, FastAPI tried
+# to parse "subject" as an int, and the browser got a 422 whose `detail` is a LIST of
+# validation objects — which the UI rendered as "[object Object]". Two failures stacked: a
+# routing bug that produced a nonsense error, and an error renderer that could not show it.
+#
+# The literal path is declared first. A `by-subject` path would also have worked, but the
+# general rule is worth keeping visible: specific before parameterised.
 
 @app.post("/memory/proposals/subject")
 def decide_subject(req: SubjectDecision) -> dict[str, object]:
@@ -545,8 +586,21 @@ def decide_subject(req: SubjectDecision) -> dict[str, object]:
     rubber stamp this whole mechanism exists to avoid."""
     from .memory import review
 
-    return {"subject": req.subject, "status": req.status,
-            "changed": review.decide_all(req.subject, req.status)}
+    changed = review.decide_all(req.subject, req.status)
+    return {"subject": req.subject, "status": req.status, "changed": changed,
+            "applied": _auto_apply(req.status) if changed else None}
+
+
+@app.post("/memory/proposals/{proposal_id}")
+def decide_proposal(proposal_id: int, req: DecisionRequest) -> dict[str, object]:
+    from .memory import review
+
+    changed = review.decide(proposal_id, req.status, req.note)
+    if not changed:
+        # Already decided. Not a 404 and not a 500: a second click on a stale page is a
+        # normal thing to do, and the honest answer is "nothing changed".
+        raise HTTPException(409, f"proposal {proposal_id} was already decided")
+    return {"id": proposal_id, "status": req.status, "applied": _auto_apply(req.status)}
 
 
 @app.post("/memory/apply")
@@ -558,6 +612,117 @@ def apply_memory() -> dict[str, object]:
         return build_mod.apply_approved()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(422, f"{type(exc).__name__}: {exc}") from exc
+
+
+def _auto_apply(status: str) -> dict[str, object] | None:
+    """Write straight through on approval, when configured to.
+
+    Approving IS the judgement; writing the page is bookkeeping, and a second button adds a
+    step without adding a decision. Failure here is reported but never undoes the approval —
+    the claim stays approved and the next `apply` picks it up, which is better than a
+    decision silently reverting because the vault was momentarily unwritable.
+    """
+    if status != "approved":
+        return None
+    from .memory import build as build_mod
+    from .memory import pipeline
+
+    if not pipeline.load_config().auto_apply:
+        return None
+    try:
+        return build_mod.apply_approved()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto-apply failed: %s", exc)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+class RememberRequest(BaseModel):
+    remember: bool
+
+
+@app.post("/conversations/{conversation_id}/remember")
+def set_remember(conversation_id: int, req: RememberRequest) -> dict[str, object]:
+    """Tell the sweep to read this conversation, or to leave it alone.
+
+    Not the same as forgetting: this stops future reading and leaves whatever was already
+    extracted alone. Unsaying that is `yoyo memory forget`, which leaves a tombstone.
+    """
+    from .memory import pipeline
+
+    if not pipeline.set_remember(conversation_id, req.remember):
+        raise HTTPException(404, f"no conversation {conversation_id}")
+    return {"conversation_id": conversation_id, "remember": req.remember}
+
+
+@app.get("/tools")
+def list_tools() -> dict[str, object]:
+    """Every tool the model can actually reach, with what it does and what it takes.
+
+    The health pill has said "34 tools" for days with no way to find out which 34. That is
+    the same complaint as an uncitable answer: the system knows something the person looking
+    at it cannot see. It also matters more here than it looks — an agent's behaviour is
+    mostly determined by the tools in front of it, and "why did it not search the web" is
+    unanswerable without this list.
+
+    Provenance is part of the answer. A tool from the filesystem server and a first-party
+    one are different kinds of thing: one is third-party code running on this machine under
+    an allowlist, the other is Yoyo's own.
+    """
+    from . import toolguide
+    from . import tools as tools_mod
+
+    mcp_report = getattr(app.state, "mcp", {}) or {}
+    owner: dict[str, str] = {}
+    for server, outcome in mcp_report.items():
+        for name in (outcome.get("tools") or []):
+            owner[name] = server
+
+    out = []
+    for spec in tools_mod.registry.specs():
+        fn = spec.get("function", spec)
+        name = fn.get("name", "")
+        params = (fn.get("parameters") or {}).get("properties") or {}
+        required = set((fn.get("parameters") or {}).get("required") or [])
+        out.append({
+            "name": name,
+            "description": fn.get("description", ""),
+            "source": owner.get(name, "built-in"),
+            # The curated half: when you would reach for it, what to say, what it refuses.
+            # A tool's own description is written for the model, not for a person.
+            **toolguide.describe(name),
+            "parameters": [
+                {
+                    "name": pname,
+                    "type": pinfo.get("type", "any"),
+                    "required": pname in required,
+                    "description": pinfo.get("description", ""),
+                    "default": pinfo.get("default"),
+                }
+                for pname, pinfo in params.items()
+            ],
+        })
+
+    servers = {
+        name: {
+            "ok": bool(outcome.get("ok")),
+            "error": outcome.get("error"),
+            "skipped": outcome.get("skipped"),
+            "tools": sorted(outcome.get("tools") or []),
+        }
+        for name, outcome in mcp_report.items()
+    }
+    return {"tools": sorted(out, key=lambda t: (t["source"] != "built-in", t["name"])),
+            "servers": servers, "count": len(out),
+            "groups": toolguide.group_order(),
+            "undocumented": sorted(t["name"] for t in out if not t["documented"])}
+
+
+@app.get("/memory/status")
+def memory_status() -> dict[str, object]:
+    from .memory import pipeline
+
+    return {**pipeline.status(), "scheduler_running": scheduler.running,
+            "last_tick": scheduler.last_tick, "last_reason": scheduler.last_reason}
 
 
 @app.get("/ui", response_class=HTMLResponse)

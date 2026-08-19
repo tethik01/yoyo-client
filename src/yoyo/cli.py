@@ -344,6 +344,43 @@ def route(
 
 
 @app.command()
+def research(
+    topic: str,
+    depth: str = typer.Option("standard", help="quick | standard | deep"),
+    corpus: bool = typer.Option(True, help="Also read your own documents"),
+    save: bool = typer.Option(True, help="Save the report to yoyo-drafts/"),
+) -> None:
+    """Research a topic properly: plan, search, read the pages, write a cited report.
+
+    Minutes, not seconds — several searches and a dozen page fetches. Every URL in the
+    report was returned by a search or fetched; invented ones are stripped and the removal
+    is reported, because a references section is exactly where people stop checking.
+    """
+    _setup_logging()
+    from . import research as research_mod
+
+    try:
+        report = research_mod.run(topic, depth=depth, use_corpus=corpus,
+                                  on_log=lambda line: console.print(f"[dim]{escape(line)}[/]"))
+    except research_mod.ResearchError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    console.print()
+    console.print(escape(report.text))
+    console.print(f"\n[dim]{report.summary()}[/]")
+    if report.invented_links:
+        console.print(f"[yellow]removed {len(report.invented_links)} invented link(s): "
+                      f"{escape(', '.join(report.invented_links))}[/]")
+    for err in report.errors[:5]:
+        console.print(f"[dim]could not read: {escape(err)}[/]")
+    if save:
+        try:
+            console.print(f"[green]saved draft:[/] {research_mod.save_draft(report)}")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]could not save a draft: {escape(str(exc))}[/]")
+
+
+@app.command()
 def eval(
     only: Optional[str] = typer.Option(None, help="Case id or kind to run"),  # noqa: UP045
     role: Optional[str] = typer.Option(  # noqa: UP045
@@ -1341,6 +1378,75 @@ def memory_show(subject: Optional[str] = typer.Argument(None)) -> None:  # noqa:
             console.print(f"    [dim]{escape(claim.source)} — \"{escape(claim.quote)}\"[/]")
         return
     console.print(f"[yellow]No memory page for {escape(subject)}.[/]")
+
+
+@memory_app.command("sweep")
+def memory_sweep(
+    idle: Optional[int] = typer.Option(None, help="Override idle_minutes for this run"),  # noqa: UP045
+) -> None:
+    """Read every idle conversation Yoyo has not read yet, and queue what it finds.
+
+    This is what the scheduler runs automatically every few minutes while `yoyo serve` is
+    up. Running it by hand is for catching up after the laptop has been shut, or for
+    watching what a sweep actually does.
+    """
+    _setup_logging()
+    from .memory import pipeline
+
+    cfg = pipeline.load_config()
+    if idle is not None:
+        cfg.idle_minutes = idle
+    report = pipeline.sweep(cfg, on_log=lambda line: console.print(f"[dim]{escape(line)}[/]"))
+    console.print(f"[green]{report.summary()}[/]")
+    if report.capped:
+        console.print("[yellow]The review queue is full. Clear some of it and run again — "
+                      "the sweep resumes exactly where it stopped.[/]")
+    if report.queued:
+        console.print("[dim]Review them: `yoyo memory review`, or the Memory tab.[/]")
+
+
+@memory_app.command("status")
+def memory_status() -> None:
+    """What continuous memory has done, and what it is waiting on."""
+    _setup_logging()
+    from .memory import pipeline
+
+    st = pipeline.status()
+    table = Table(show_header=False, box=None)
+    table.add_row("sweeping", "enabled" if st["config"]["enabled"] else "[yellow]disabled[/]")
+    table.add_row("idle trigger", f"{st['config']['idle_minutes']} min")
+    table.add_row("nightly", f"{st['config']['nightly_hour']:02d}:00")
+    table.add_row("conversations read", str(st["conversations_swept"]))
+    table.add_row("claims ever queued", str(st["claims_ever_queued"]))
+    table.add_row("last sweep", str(st["last_sweep"] or "never"))
+    table.add_row("waiting to be read", str(st["waiting"]))
+    table.add_row("ignored conversations", str(st["conversations_ignored"]))
+    table.add_row("queue", str(st["queue"]))
+    console.print(table)
+    if st["capped"]:
+        console.print(f"[yellow]Queue is at the cap ({st['config']['queue_cap']}). Sweeping "
+                      f"is paused until you clear some.[/]")
+
+
+@memory_app.command("ignore")
+def memory_ignore(
+    conversation: int = typer.Argument(..., help="Conversation id"),
+    undo: bool = typer.Option(False, "--undo", help="Start remembering it again"),
+) -> None:
+    """Tell the sweep to leave a conversation alone.
+
+    Not the same as forgetting. This stops future reading; what was already extracted stays
+    where it is, and unsaying that is `yoyo memory forget`, which leaves a tombstone. Two
+    different acts, and conflating them would make one of them silent.
+    """
+    _setup_logging()
+    from .memory import pipeline
+
+    if not pipeline.set_remember(conversation, undo):
+        console.print(f"[yellow]no conversation {conversation}[/]")
+        raise typer.Exit(1)
+    console.print(f"[green]conversation {conversation}: "
+                  f"{'remembered again' if undo else 'will be ignored by the sweep'}[/]")
 
 
 @memory_app.command("review")

@@ -70,6 +70,22 @@ with sync_playwright() as pw:
     check("approving removes it from the queue", page.locator(".claim").count() == before - 1,
           f"{before} -> {page.locator('.claim').count()}")
 
+    # --- continuous memory: status strip + the per-conversation opt-out
+    check("sweep status shown", "sweeping" in page.inner_text("#sweepStatus").lower()
+                                or "paused" in page.inner_text("#sweepStatus").lower(),
+          page.inner_text("#sweepStatus")[:120])
+
+    # --- "keep all": the live bug. A whole subject at once must work, and any failure must
+    # render as a sentence rather than as [object Object].
+    subjects_before = page.locator(".subject").count()
+    page.locator('.subject header button[data-status="rejected"]').first.click()
+    page.wait_for_timeout(700)
+    check("keep/drop all clears a whole subject",
+          page.locator(".subject").count() == subjects_before - 1,
+          f"{subjects_before} -> {page.locator('.subject').count()}")
+    check("no [object Object] anywhere", "[object" not in page.inner_text("body"),
+          page.inner_text("#toasts")[:120])
+
     # --- map
     page.click('[data-view="map"]')
     page.wait_for_timeout(900)
@@ -78,6 +94,25 @@ with sync_playwright() as pw:
     check("map counts yoyo pages", "yoyo's pages" in page.inner_text("#mapTiles").lower(),
           page.inner_text("#mapTiles")[:80])
     page.screenshot(path=str(OUT / "3-map.png"))
+
+    # --- tools page, reached from the health pill
+    page.click("#health")
+    page.wait_for_timeout(700)
+    check("health pill opens the tools page", page.inner_text("#viewTitle") == "Tools",
+          page.inner_text("#viewTitle"))
+    check("tools listed", page.locator(".tool-row").count() >= 4,
+          str(page.locator(".tool-row").count()))
+    check("tool params shown", "top_k" in page.inner_text("#toolList"))
+    check("the guide groups tools by intent",
+          "your documents" in page.inner_text("#toolList").lower(),
+          page.inner_text("#toolList")[:120])
+    check("the guide says when to use one", "try:" in page.inner_text("#toolList").lower())
+    page.fill("#toolFilter", "corpus")
+    page.wait_for_timeout(300)
+    check("filter narrows the list", page.locator(".tool-row").count() < 4,
+          str(page.locator(".tool-row").count()))
+    page.fill("#toolFilter", "")
+    page.screenshot(path=str(OUT / "8-tools.png"))
 
     # --- health: run doctor (it will FAIL checks offline — that is the interesting case)
     page.click('[data-view="health"]')
@@ -101,6 +136,34 @@ with sync_playwright() as pw:
     grew = page.evaluate("() => document.querySelectorAll('.toast').length > window.__t")
     check("a bad request raises a toast", grew)
     page.screenshot(path=str(OUT / "5-error-toast.png"))
+
+    # --- research tab
+    page.click('[data-view="research"]')
+    page.wait_for_timeout(500)
+    check("research tab renders", page.inner_text("#viewTitle") == "Research")
+    check("no reports yet is stated", "no research yet" in page.inner_text("#reportHistory").lower(),
+          page.inner_text("#reportHistory")[:80])
+    page.click("#runResearch")     # empty topic
+    page.wait_for_timeout(400)
+    check("an empty topic is refused with a toast",
+          "topic" in page.inner_text("#toasts").lower(), page.inner_text("#toasts")[:80])
+    page.screenshot(path=str(OUT / "9-research.png"))
+
+    # --- deleting a conversation from the sidebar
+    page.click('[data-view="chat"]')
+    page.evaluate("""async () => {
+      await fetch('/conversations?title=Throwaway', {method:'POST',
+        headers:{'x-yoyo-token': TOKEN}});
+      await loadConversations();
+    }""")
+    page.wait_for_timeout(400)
+    before = page.locator(".conv").count()
+    check("a conversation is listed", before >= 1, str(before))
+    page.on("dialog", lambda d: d.accept())
+    page.locator(".conv .del").first.click(force=True)
+    page.wait_for_timeout(700)
+    check("deleting removes it from the sidebar", page.locator(".conv").count() == before - 1,
+          f"{before} -> {page.locator('.conv').count()}")
 
     # --- dark mode (the default this UI is designed for)
     page.emulate_media(color_scheme="dark")

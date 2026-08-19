@@ -68,7 +68,7 @@ def list_conversations(limit: int = 50) -> list[dict[str, object]]:
     """Most recently updated first — the order a sidebar wants."""
     with db.connection() as conn:
         rows = conn.execute(
-            """SELECT c.id, c.title, c.created_at, c.updated_at,
+            """SELECT c.id, c.title, c.created_at, c.updated_at, c.remember,
                       (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS turns
                  FROM conversations c
                 ORDER BY c.updated_at DESC, c.id DESC

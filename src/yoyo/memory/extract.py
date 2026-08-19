@@ -50,6 +50,16 @@ Rules — these are correctness requirements, not preferences:
    true, it is quotable, and it says nothing about the user. Discard it.
 6. The source contains only what the USER said; the assistant's replies have already been
    removed. Anything you cannot support from the user's own words does not exist.
+7. A QUESTION is not a fact. "Can you explain the West Asia conflict" tells you the user was
+   curious, which is not something to remember about him. Most of a chat transcript is
+   questions; expect to return nothing from those.
+
+What IS worth remembering, in rough order of value:
+  * people and how they relate to the user — "my sister Priya", "Alice from work"
+  * plans and commitments, especially dated ones — a trip, a deadline, an appointment
+  * decisions the user made and the reason
+  * preferences, constraints and dislikes that will still hold in six months
+  * projects, tools and places the user is personally tied to
 4. Skip anything about Yoyo itself, this software, or the conversation as an event.
 5. If the source contains no durable facts about entities, return an EMPTY list. An empty
    answer is a correct answer and is expected often.
