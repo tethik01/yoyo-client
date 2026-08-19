@@ -4,60 +4,30 @@ Measured 2026-08-13 on the bring-up bench. This is the evidence behind ADR-022, 
 ADR-024. Re-run and re-date this file whenever the pinned models change; do not edit the
 numbers in place.
 
+> **⚠ PARTIALLY STALE as of 2026-08-15 — read this before quoting any number below.**
+>
+> Everything here was measured before `coder` existed. Specifically:
+>
+> - **§1 "Pinned capabilities" is out of date.** A third capability, `coder`
+>   (qwen3-coder-next, 80B-A3B MoE, ~50 tok/s single-stream), was measured and promoted on
+>   2026-08-15 and now backs `supervisor`, `worker`, `answer`, `summarize` and `extract`.
+>   The numbers for it live in **ADR-027**, not here.
+> - **§2 concurrency**: the `coder` figure has been **corrected twice**. First recorded as
+>   1.09x (serialises, single trial); re-measured 2026-08-15 over three repeats as
+>   **3.75x @ 4** after the box's keep-alive and loaded-model limits were raised. See the
+>   ADR-027 addendum. The graph's fan-out **does** pay on `coder`.
+> - `gemma4`, `nemotron-3.5-lightning` and `qwen3.6:27b` appear below as bake-off entrants.
+>   **Confirmed removed** — `ollama list` on 2026-08-15 shows three models and only three
+>   (see §7). Their numbers below are historical and are kept because a bake-off you cannot
+>   re-read is a bake-off you have to re-run.
+>
+> The measurements that ARE here remain valid: they were taken on this hardware and nothing
+> invalidates them. What is stale is the claim that this file describes the current lineup.
+> Re-run `yoyo bench --role <role> --concurrency 1,4` and re-date the file when you do.
+
 **Host:** ASUS Ascent GX10, NVIDIA GB10 Grace Blackwell, 128 GB unified LPDDR5X @ 273 GB/s
 (121 GB reported usable), 1 TB PCIe Gen4 NVMe, DGX OS 7.5.0, driver 580.173.02, CUDA 13.0,
 aarch64.
-
----
-
-## 0. Second measurement round — 2026-08-15, qwen3-coder-next
-
-Measured with `yoyo bench` and `yoyo eval` from the laptop over Tailscale. Same instrument
-for both models, distinct prompts, 429s counted separately (none occurred).
-
-| Capability | Model | Active params | Single-stream | Scaling @4 | Gates |
-|---|---|---|---|---|---|
-| `agent` | muse-glimmer 27.9B dense | 27.9B | **11.7 tok/s** | **3.76x** | 7/7 |
-| `coder` | qwen3-coder-next 80B MoE | **3B** | **50.0 tok/s** | **1.09x** | **7/7** |
-
-The 3.76x figure independently reproduces the bring-up bake-off's 3.62x — different
-instrument, different day, same answer.
-
-**Sparsity again predicts speed.** `coder` is nearly three times the total size of `agent`
-and generates 4.3x faster, because only 3B parameters are active per token. It also has no
-thinking mode, so none of that output is spent on reasoning traces — `agent` spent 358
-tokens on a bare "ping".
-
-**Concurrency again refuses to follow architecture.** `coder` is MoE and serialises;
-`agent` is dense and scales. But `qwen3.6:27b` is dense and serialises too (1.01x), so
-"dense scales" is not a rule either — muse-glimmer remains the sole outlier across five
-measured models, and the cause is still unexplained. ADR-022 stands: measure, never infer.
-
-**Gate detail for `coder` (7/7):** fidelity-basic 2 iters · fidelity-under-pressure 2 iters
-· retry-after-error **3 iters (retried and recovered)** · worker-fidelity 2 iters · both
-grounded cases cited valid chunks · abstained appropriately. Case latencies 1.5–8.5 s
-against 30–60 s for `agent`.
-
-### Thinking overhead beats raw throughput
-
-`fast` is nominally the quickest model on the box (76 tok/s vs `coder`'s 50) and is the
-slowest in practice, because thinking is on and its output goes to reasoning traces before
-the answer starts. Measured on identical RAG turns, same corpus, same six retrieved sources:
-
-| Turn | `coder` | `fast` |
-|---|---|---|
-| `yoyo ask "what did the bake-off conclude about concurrency?"` | **9.2 s** | 20.7 s |
-| eval grounded-concurrency | **8.5 s** | 23.0 s |
-| eval grounded-tool-constraint | **6.9 s** | 16.5 s |
-| eval abstain-unknown | **4.8 s** | 12.3 s |
-
-Both answers were correct and well-cited; no quality regression was visible in the prose.
-`answer`, `summarize` and `extract` moved to `coder` on this evidence; `answer_fast` keeps
-`fast` reachable for comparison.
-
-**Revisit when `think: false` lands on `fast`.** Until then, tok/s on a thinking model is
-not a latency prediction — a third case where the obvious number was the wrong one, after
-file size (ADR-022) and total parameters (ADR-027).
 
 ---
 
@@ -79,8 +49,14 @@ download. Generation is bandwidth-bound on *active* parameters, not on file size
 | qwen3.6 (`fast`) | 1.13x | 71.6 | 3.2 s → 11.2 s |
 | qwen3.6:27b (dense) | 1.01x | 12.1 | 16.7 s → 66.1 s |
 | nemotron-3.5-lightning | 1.00x | 67.2 | 3.0 s → 11.9 s |
+| qwen3-coder-next (`coder`) — 2026-08-15, 3 repeats | **3.75x** | 55.5 | 20.2 s → 20.5 s |
 
-Three of four serialise completely. `agent` is the only capability where four concurrent
+**The `coder` row is from a later run on a differently-configured box** (`MAX_LOADED_MODELS=3`,
+`KEEP_ALIVE=30m`) and is not comparable line-for-line with the bring-up rows above. An earlier
+single-trial run of the same model read 1.09x. A scaling number is only valid for the host
+state it was taken on — which the rows above do not record, and which is why this one does.
+
+Of the four bring-up entrants, three of four serialise completely. `agent` is the only capability where four concurrent
 requests cost barely more than one (+1.8 s).
 
 **The cause of the exception is unexplained.** Two architectural hypotheses were tested and
@@ -148,8 +124,18 @@ prefix caching exploits — retest before ruling on it.
 **SGLang** — a maintenance liability on this platform: a single orphaned build lagging
 upstream.
 
-**Also present during bring-up, slated for removal:** `gemma4`, `nemotron-3.5-lightning`,
-`qwen3.6:27b`. Final state unconfirmed — verify with `ollama list` and `/v1/models`.
+**Also present during bring-up, since removed:** `gemma4`, `nemotron-3.5-lightning`,
+`qwen3.6:27b`. **Confirmed gone 2026-08-15** — `ollama list` on the box returns exactly:
+
+| Model | Size | Serves capability |
+|---|---|---|
+| `qwen3-coder-next:latest` | 51 GB | `coder` — the default pin for every tool and prose role |
+| `muse-glimmer:latest` | 18 GB | `agent` — fallback; the only capability that scales under concurrency |
+| `qwen3.6:latest` | 23 GB | `fast` — no tools, ever (ADR-023) |
+
+92 GB of the 121 GB usable is model weights. That is the real constraint behind
+`OLLAMA_MAX_LOADED_MODELS`: three capabilities are pinned and all three cannot be resident
+at once, so a role switch can cost a cold load.
 
 ## 8. Not deployed
 

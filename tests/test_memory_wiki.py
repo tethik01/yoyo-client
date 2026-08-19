@@ -316,3 +316,304 @@ def test_generated_non_pages_are_not_read_back_as_entities(tmp_path):
 
     loaded = build.load_pages(tmp_path)
     assert set(loaded) == {("person", "priya")}
+
+
+# ------------------------------------------------------------------ dry run ---
+# The command that answers "is this extraction worth keeping" must not require writing
+# pages about your family to your vault in order to answer it.
+
+
+def _transcript(said: str) -> str:
+    """A real rendered transcript. Passing bare text would not exercise the owner/assistant
+    split, and that split is now load-bearing."""
+    from yoyo.memory import sources as sources_mod
+
+    return sources_mod.render(1, "t", [{"role": "user", "content": said}])[0]
+
+
+def _fake_extraction(monkeypatch, claims):
+    monkeypatch.setattr(
+        "yoyo.memory.extract.from_source",
+        lambda source_id, text, role="extract": [
+            Claim(source=source_id, **c) for c in claims
+        ],
+    )
+
+
+def test_a_dry_run_writes_nothing_at_all(tmp_path, monkeypatch):
+    _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person",
+                                    "claim": "flying to Lisbon",
+                                    "quote": "Priya is flying to Lisbon"}])
+    sources = {"conversation://1": _transcript("Priya is flying to Lisbon on the 14th.")}
+    report = build.build(sources, root=tmp_path, dry_run=True)
+
+    assert report.accepted == 1
+    assert list(tmp_path.rglob("*.md")) == []
+
+
+def test_a_dry_run_leaves_the_append_only_log_untouched(tmp_path, monkeypatch):
+    """The log's only value is being an accurate record. A build that never happened must
+    not appear in it."""
+    _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "c",
+                                    "quote": "Priya"}])
+    build.build({"conversation://1": _transcript("Priya is my sister and lives nearby")},
+                root=tmp_path, dry_run=True)
+    assert not (tmp_path / wiki.WIKI_DIR / wiki.LOG_FILE).exists()
+
+
+def test_a_dry_run_returns_the_pages_so_the_claims_can_be_read(tmp_path, monkeypatch):
+    """Counts cannot answer 'is this worth keeping'. A claim is only judgeable next to its
+    quote, so the report has to carry both."""
+    _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person",
+                                    "claim": "flying to Lisbon",
+                                    "quote": "Priya is flying to Lisbon"}])
+    report = build.build({"conversation://1": _transcript("Priya is flying to Lisbon.")},
+                         root=tmp_path, dry_run=True)
+    page = report.pages[0]
+    assert page.subject == "Priya"
+    assert page.claims[0].quote == "Priya is flying to Lisbon"
+    assert "DRY RUN" in report.summary()
+
+
+def test_a_dry_run_does_not_disturb_pages_already_on_disk(tmp_path, monkeypatch):
+    _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "first",
+                                    "quote": "Priya"}])
+    build.build({"conversation://1": _transcript("Priya is my sister, she lives nearby")},
+                root=tmp_path)
+    page_path = next(p for p in tmp_path.rglob("*.md") if "Priya" in p.name)
+    before = page_path.read_text(encoding="utf-8")
+
+    _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "second",
+                                    "quote": "Priya"}])
+    build.build({"conversation://2": _transcript("Priya is my sister, she lives nearby")},
+                root=tmp_path, dry_run=True)
+    assert page_path.read_text(encoding="utf-8") == before
+
+
+def test_a_real_run_still_writes(tmp_path, monkeypatch):
+    """The dry-run flag must not become the default by accident."""
+    _fake_extraction(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "c",
+                                    "quote": "Priya"}])
+    build.build({"conversation://1": _transcript("Priya is my sister, she lives nearby")},
+                root=tmp_path)
+    assert (tmp_path / wiki.WIKI_DIR / wiki.LOG_FILE).exists()
+    assert any("Priya" in p.name for p in tmp_path.rglob("*.md"))
+
+
+# ------------------------------- the model may not be its own source (found live) ---
+# 2026-08-15. A dry run over two real conversations produced six pages — World War I, the
+# Abraham Accords, Gaza — with every quote verifying and nothing rejected. A perfect run by
+# every number, and worthless: the claims were quotes of *Yoyo* explaining geopolitics,
+# filed as things to remember about the owner's life.
+#
+# The gates were never breached. They were walked around: half of every conversation
+# transcript is model output, and "a claim must quote a raw source" did not say whose words
+# a raw source contains. These tests pin the tightened rule.
+
+
+def test_the_assistants_half_of_a_transcript_is_not_evidence():
+    from yoyo.memory import sources as sources_mod
+
+    text = sources_mod.render(1, "geopolitics", [
+        {"role": "user", "content": "explain the West Asia conflict to me in simple terms"},
+        {"role": "assistant",
+         "content": "The current conflict features extensive foreign backing of both sides."},
+    ])[0]
+
+    evidence = build.evidence_from("conversation://1", text)
+    assert "explain the West Asia conflict" in evidence
+    assert "foreign backing" not in evidence
+
+
+def test_a_note_the_owner_wrote_is_evidence_in_full():
+    """The distinction is authorship, not file type. A vault note is the owner's prose all
+    the way through, so none of it is dropped."""
+    note = "# Trip\n\nPriya is flying to Lisbon on the 14th.\n"
+    assert build.evidence_from("vault://Trip.md", note) == note
+
+
+def test_a_claim_quoting_the_assistant_cannot_survive_verification(tmp_path, monkeypatch):
+    """End to end, in the exact shape observed: the model proposes a claim quoting its own
+    earlier answer. It must be rejected, not filed."""
+    from yoyo.memory import sources as sources_mod
+
+    text = sources_mod.render(1, "geopolitics", [
+        {"role": "user", "content": "tell me about the Abraham Accords please"},
+        {"role": "assistant", "content": "Regional alliances like the Abraham Accords matter."},
+    ])[0]
+    _fake_extraction(monkeypatch, [{
+        "subject": "Abraham Accords", "kind": "organisation",
+        "claim": "The Abraham Accords are an example of regional alliances",
+        "quote": "Regional alliances like the Abraham Accords",
+    }])
+
+    report = build.build({"conversation://1": text}, root=tmp_path, dry_run=True)
+    assert report.accepted == 0
+    assert report.rejected
+    assert list(tmp_path.rglob("*.md")) == []
+
+
+def test_a_claim_quoting_the_owner_still_passes(tmp_path, monkeypatch):
+    """The fix must not close the door on real memories — under-extracting everything would
+    pass the test above and be just as useless."""
+    from yoyo.memory import sources as sources_mod
+
+    text = sources_mod.render(2, "family", [
+        {"role": "user", "content": "My sister Priya is flying to Lisbon on the 14th."},
+        {"role": "assistant", "content": "Noted. Want a reminder before the 14th?"},
+    ])[0]
+    _fake_extraction(monkeypatch, [{
+        "subject": "Priya", "kind": "person", "claim": "Priya is the owner's sister",
+        "quote": "My sister Priya is flying to Lisbon",
+    }])
+
+    report = build.build({"conversation://2": text}, root=tmp_path, dry_run=True)
+    assert report.accepted == 1
+
+
+def test_a_transcript_with_no_owner_turns_yields_nothing(tmp_path, monkeypatch):
+    """Under-extraction is the safe direction. A source Yoyo did all the talking in has
+    nothing in it the owner ever confirmed."""
+    from yoyo.memory import sources as sources_mod
+
+    text = sources_mod.render(3, "monologue", [
+        {"role": "assistant", "content": "Here is everything I know about the GB10 box."},
+    ])[0]
+    _fake_extraction(monkeypatch, [{"subject": "GB10", "kind": "project", "claim": "c",
+                                    "quote": "everything I know about the GB10"}])
+    assert build.build({"conversation://3": text}, root=tmp_path, dry_run=True).accepted == 0
+
+
+# ------------------------------------------- the review queue (Phase 2, 2026-08-15) ---
+# The gates prove a claim is TRACEABLE. Only the owner can say whether it is WORTH KEEPING —
+# six pages of world history passed every gate on the first real run. These tests pin the
+# properties that make a review survivable rather than a rubber stamp.
+
+import pytest
+
+from yoyo.memory import review
+
+
+@pytest.fixture()
+def store(tmp_path, monkeypatch):
+    from yoyo.storage import db as db_mod
+
+    path = tmp_path / "yoyo.db"
+    monkeypatch.setattr(db_mod, "DEFAULT_PATH", path, raising=False)
+    real = db_mod.connection
+    monkeypatch.setattr(db_mod, "connection", lambda p=None: real(p or path))
+    db_mod.migrate(path)
+    return path
+
+
+def _queued(subject="Priya", claim="is my sister", quote="my sister Priya",
+           source="conversation://1", kind="person"):
+    return Claim(subject=subject, kind=kind, claim=claim, quote=quote, source=source)
+
+
+def test_a_proposal_is_queued_not_written(store, tmp_path):
+    review.propose([_queued()])
+    assert len(review.pending()) == 1
+    assert list(tmp_path.rglob("*.md")) == []
+
+
+def test_proposing_twice_does_not_ask_twice(store):
+    review.propose([_queued()])
+    second = review.propose([_queued()])
+    assert second.proposed == 0
+    assert second.already_pending == 1
+    assert len(review.pending()) == 1
+
+
+def test_a_rejected_claim_is_never_re_proposed(store):
+    """The property that makes review survivable. A queue that re-asks what you already
+    rejected is a treadmill, a treadmill gets rubber-stamped, and a rubber-stamped review is
+    worse than none — it launders the same output while looking careful."""
+    review.propose([_queued()])
+    assert review.decide(review.pending()[0]["id"], "rejected")
+
+    again = review.propose([_queued()])
+    assert again.proposed == 0
+    assert again.already_decided == 1
+    assert review.pending() == []
+
+
+def test_the_same_fact_from_a_different_conversation_is_a_separate_proposal(store):
+    """Corroboration is information. Collapsing two sources into one claim would hide that
+    the owner said it twice."""
+    review.propose([_queued(source="conversation://1")])
+    review.propose([_queued(source="conversation://2")])
+    assert len(review.pending()) == 2
+
+
+def test_a_reworded_claim_from_the_same_quote_is_not_asked_again(store):
+    """Normalised fingerprint. A model that re-words its own summary of the same evidence
+    does not get a second bite."""
+    review.propose([_queued(claim="is my sister")])
+    again = review.propose([_queued(claim="Is  My   Sister")])
+    assert again.proposed == 0
+
+
+def test_deciding_the_same_proposal_twice_reports_no_change(store):
+    review.propose([_queued()])
+    pid = review.pending()[0]["id"]
+    assert review.decide(pid, "approved") is True
+    assert review.decide(pid, "rejected") is False, "a decision is not silently re-openable"
+
+
+def test_a_whole_subject_can_be_rejected_at_once(store):
+    """The judgement that was actually needed on the first real run: 'this entire page is
+    world history, not me'."""
+    review.propose([
+        _queued(subject="World War I", kind="event", claim="a", quote="q1"),
+        _queued(subject="World War I", kind="event", claim="b", quote="q2"),
+        _queued(subject="Priya"),
+    ])
+    assert review.decide_all("World War I", "rejected") == 2
+    assert [r["subject"] for r in review.pending()] == ["Priya"]
+
+
+def test_only_approved_claims_reach_a_page(store, tmp_path, monkeypatch):
+    review.propose([_queued(subject="Priya"), _queued(subject="Gaza", kind="place",
+                                                    claim="a conflict", quote="Gaza")])
+    for row in review.pending():
+        review.decide(row["id"], "approved" if row["subject"] == "Priya" else "rejected")
+
+    result = build.apply_approved(root=tmp_path)
+    written = [p.name for p in tmp_path.rglob("*.md")]
+    assert result["claims"] == 1
+    assert any("Priya" in n for n in written)
+    assert not any("Gaza" in n for n in written)
+
+
+def test_applying_twice_does_not_write_the_same_claim_twice(store, tmp_path):
+    review.propose([_queued()])
+    review.decide(review.pending()[0]["id"], "approved")
+    build.apply_approved(root=tmp_path)
+    second = build.apply_approved(root=tmp_path)
+    assert second["claims"] == 0
+
+
+def test_nothing_approved_writes_nothing(store, tmp_path):
+    review.propose([_queued()])
+    assert build.apply_approved(root=tmp_path)["claims"] == 0
+    assert not (tmp_path / wiki.WIKI_DIR).exists()
+
+
+def test_the_approval_rate_is_reported(store):
+    """The number worth watching. Near 100% means it is proposing the obvious; near 0% means
+    noise. Neither is visible from 'how many memories do I have'."""
+    review.propose([_queued(subject="A", quote="a"), _queued(subject="B", quote="b"),
+                    _queued(subject="C", quote="c")])
+    rows = review.pending()
+    review.decide(rows[0]["id"], "approved")
+    review.decide(rows[1]["id"], "rejected")
+    stats = review.stats()
+    assert stats["pending"] == 1
+    assert stats["approval_rate"] == 0.5
+
+
+def test_an_empty_queue_has_no_approval_rate_rather_than_zero(store):
+    """Zero would read as 'everything was rejected'. Nothing decided is not the same as
+    nothing kept — the same absence-vs-evidence distinction as everywhere else here."""
+    assert review.stats()["approval_rate"] is None

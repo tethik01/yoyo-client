@@ -451,10 +451,23 @@ def test_unknown_role_prints_one_line_not_a_traceback(monkeypatch, capsys):
 
 
 def _extraction_case(**over):
+    """A case whose source is a REAL rendered transcript.
+
+    Bare text would skip the owner/assistant split the runner now applies, and testing a
+    path production does not take is how six pages of world history passed three green
+    gates on 2026-08-15.
+    """
+    from yoyo.memory import sources as sources_mod
+
+    said = over.pop("said", "My sister Priya is flying to Lisbon on the 14th.")
+    heard = over.pop("heard", "Noted.")
     case = {
         "id": "x", "kind": "extraction", "role": "extract",
         "source_id": "conversation://x",
-        "source": "My sister Priya is flying to Lisbon on the 14th.",
+        "source": sources_mod.render(1, "t", [
+            {"role": "user", "content": said},
+            {"role": "assistant", "content": heard},
+        ])[0],
     }
     case.update(over)
     return case
@@ -496,13 +509,13 @@ def test_a_single_unverifiable_quote_fails_the_case(monkeypatch):
 def test_the_abstain_gate_fails_a_model_that_invents_from_nothing(monkeypatch):
     _claims(monkeypatch, [{"subject": "Priya", "kind": "person", "claim": "exists",
                            "quote": "Priya"}])
-    case = _extraction_case(expect_empty=True, source="Can you re-run that? Priya")
+    case = _extraction_case(expect_empty=True, said="Can you re-run that command? Priya")
     assert not evals.RUNNERS["extraction"](case).passed
 
 
 def test_the_abstain_gate_passes_on_zero_claims(monkeypatch):
     _claims(monkeypatch, [])
-    case = _extraction_case(expect_empty=True, source="Can you re-run that command?")
+    case = _extraction_case(expect_empty=True, said="Can you re-run that command please?")
     result = evals.RUNNERS["extraction"](case)
     assert result.passed
     assert "abstain" in result.detail

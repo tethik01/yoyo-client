@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 
 MARKDOWN_SUFFIXES = {".md", ".markdown"}
 DRAFTS_DIR = "yoyo-drafts"
+#: Yoyo's own wiki. Visible on the map, invisible to search — see `_notes`. Kept in step
+#: with `memory.wiki.WIKI_DIR`; a test asserts they agree, because two spellings of one
+#: folder name is how an exclusion silently stops excluding.
+MEMORY_DIR = "yoyo-memory"
 MAX_READ_BYTES = 400_000
 
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
@@ -82,12 +86,29 @@ def _rel(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _notes(root: Path) -> list[Path]:
-    """Canon notes only.
+def _notes(root: Path, include_generated: bool = False) -> list[Path]:
+    """Canon notes only — what Yoyo may READ BACK and CITE.
 
-    Drafts are excluded deliberately: they are Yoyo's unapproved output, not part of the
-    vault's knowledge. Letting them into search would let the assistant cite itself.
+    Two folders are excluded, for the same reason and with different histories.
+
+    `yoyo-drafts/` has been excluded since day one: it is Yoyo's unapproved output, and
+    letting it into search would let the assistant cite itself.
+
+    `yoyo-memory/` was NOT, and that was a hole. Extraction already refuses to read from it
+    (`build.evidence_from` never treats a wiki page as a raw source), so the laundering path
+    was closed at write time — but `vault_search` could still find those pages and hand them
+    to the model as "your notes". Same circularity, arriving through retrieval instead of
+    extraction, and worse: at write time a wrong quote fails a check, while at read time the
+    quote is genuinely there. Nothing mechanical could have caught it.
+
+    So the rule is: **a memory page is an index, never evidence.** Recall resolves a page to
+    the conversation it came from and cites THAT.
+
+    `include_generated=True` is for the map. The vault graph SHOULD show memory pages — they
+    are the reason the map is interesting — and drawing a node is not citing it. Callers that
+    feed a model must never pass it.
     """
+    excluded = {DRAFTS_DIR} if include_generated else {DRAFTS_DIR, MEMORY_DIR}
     return [
         p
         for p in root.rglob("*")
@@ -95,7 +116,7 @@ def _notes(root: Path) -> list[Path]:
         and p.suffix.lower() in MARKDOWN_SUFFIXES
         and ".obsidian" not in p.parts
         and ".trash" not in p.parts
-        and DRAFTS_DIR not in p.parts
+        and not (excluded & set(p.parts))
     ]
 
 
@@ -225,6 +246,14 @@ def stats() -> dict[str, object]:
             if (root / DRAFTS_DIR).is_dir()
             else 0
         ),
+        # Counted separately from `notes` on purpose: Yoyo's pages are not part of what you
+        # wrote, and folding them into one number would make the vault look better read
+        # than it is.
+        "memory_pages": (
+            len(list((root / MEMORY_DIR).rglob("*.md")))
+            if (root / MEMORY_DIR).is_dir()
+            else 0
+        ),
     }
 
 
@@ -249,7 +278,7 @@ def graph(folder: str = "", limit: int = 500) -> dict[str, object]:
     nodes: dict[str, dict[str, object]] = {}
     edges: list[dict[str, str]] = []
 
-    paths = sorted(_notes(base))[:limit]
+    paths = sorted(_notes(base, include_generated=True))[:limit]
     for path in paths:
         rel = _rel(path, root)
         try:
@@ -262,6 +291,9 @@ def graph(folder: str = "", limit: int = 500) -> dict[str, object]:
             "path": rel,
             "bytes": path.stat().st_size,
             "exists": True,
+            # Yoyo wrote this one. The map shows it; search will not, and the UI colours it
+            # differently so "my note" and "Yoyo's page about me" never look alike.
+            "generated": MEMORY_DIR in path.parts,
             # Matched on stem: the corpus stores a source path that may differ from the
             # vault-relative one, and an exact-path join would report everything as absent.
             "in_corpus": path.stem.lower() in ingested,
@@ -291,10 +323,15 @@ def graph(folder: str = "", limit: int = 500) -> dict[str, object]:
         "nodes": list(nodes.values()),
         "edges": edges,
         "stats": {
-            "notes": sum(1 for n in nodes.values() if n["exists"]),
+            # Yoyo's pages are drawn on the map but are NOT "your notes". Counting them
+            # together would make the vault look better read than it is — the same
+            # your-notes-versus-Yoyo's-writing confusion the search exclusion exists for.
+            "notes": sum(1 for n in nodes.values()
+                         if n["exists"] and not n.get("generated")),
             "missing": sum(1 for n in nodes.values() if not n["exists"]),
             "empty": sum(1 for n in nodes.values() if n["exists"] and n["empty"]),
             "in_corpus": sum(1 for n in nodes.values() if n["in_corpus"]),
+            "generated": sum(1 for n in nodes.values() if n.get("generated")),
             "links": len(edges),
         },
     }

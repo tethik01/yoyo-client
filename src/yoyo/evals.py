@@ -318,11 +318,16 @@ def _run_extraction_case(case: dict[str, Any]) -> CaseResult:
     3. **Recall**, last and softest. `must_find` names subjects that should be present. This
        is the only one where being wrong is merely disappointing.
     """
+    from .memory import build as build_mod
     from .memory import extract as extract_mod
     from .memory import wiki
 
     source_id = case.get("source_id") or f"conversation://{case['id']}"
-    text = case.get("source", "")
+    # Through the same owner/assistant split the real build applies. A gate that tested the
+    # full transcript would be testing a path production no longer takes — and it was
+    # exactly that gap between "what the gate checks" and "what the pipeline does" that let
+    # six pages of world history through on 2026-08-15 with three green gates.
+    text = build_mod.evidence_from(source_id, case.get("source", ""))
     role = _role_for(case, "extract")
 
     try:

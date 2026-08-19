@@ -263,6 +263,27 @@ from a confusing model error three questions later.
 
 ---
 
+## 9b. The one thing Yoyo refuses to do
+
+`yoyo remember` and `yoyo memory build` **will not run on an unencrypted disk.** They exit
+with a message rather than a warning, because a warning above a green summary line is a
+warning nobody reads twice.
+
+```powershell
+Get-BitLockerVolume -MountPoint C:     # FullyDecrypted = unprotected
+yoyo doctor                            # "encryption at rest" must be green
+```
+
+That was your own condition — BitLocker before real data goes in — and `yoyo remember` puts a
+searchable transcript of every conversation on that disk while `memory build` puts structured
+pages about your family next to it. `--force` still works for throwaway content; typing it is
+the point.
+
+Turning encryption on is yours to do: Settings → Privacy & security → Device encryption, and
+**store the recovery key somewhere that is not the laptop.**
+
+---
+
 ## 10. Things that are still true and worth remembering
 
 - **BitLocker is off.** Your Gmail refresh token, corpus, and conversation history sit

@@ -268,3 +268,130 @@ def test_the_env_check_fails_and_names_the_duplicated_key(monkeypatch):
     assert got.ok is False
     assert "YOYO_VAULT_PATH" in got.detail
     assert "LAST occurrence wins" in got.detail
+
+
+# ------------------------------------------------- encryption at rest (OQ4) ---
+# The gate the owner set for himself. It has lived in a README row and in his head for three
+# days; these tests are what move it into the machine.
+
+
+def test_an_unencrypted_disk_fails_doctor(monkeypatch):
+    """A FAIL is deliberate. Doctor is what you run before believing anything works, and
+    unencrypted is the state in which memory must not be trusted with real material."""
+    monkeypatch.setattr(doctor, "bitlocker_status", lambda: ("FullyDecrypted", ""))
+    checks = {c.name: c for c in doctor.run_all()}
+    assert checks["encryption at rest"].ok is False
+    assert "not encrypted" in checks["encryption at rest"].detail.lower()
+
+
+def test_an_encrypted_disk_passes_and_says_the_question_is_closed(monkeypatch):
+    monkeypatch.setattr(doctor, "bitlocker_status", lambda: ("FullyEncrypted", ""))
+    check = {c.name: c for c in doctor.run_all()}["encryption at rest"]
+    assert check.ok
+    assert "OQ4" in check.detail
+
+
+def test_encryption_in_progress_is_not_treated_as_protected(monkeypatch):
+    """Half-encrypted protects nothing yet, and the status string is reassuring enough to
+    be read as done."""
+    monkeypatch.setattr(doctor, "bitlocker_status", lambda: ("EncryptionInProgress", ""))
+    assert not {c.name: c for c in doctor.run_all()}["encryption at rest"].ok
+
+
+def test_unknown_status_passes_rather_than_failing(monkeypatch):
+    """Unknown is not the same as unencrypted. Reporting an absence you never established is
+    the failure this project has six catalogued variants of — this is not the place for a
+    seventh, and a check that fails on every non-Windows box gets ignored everywhere."""
+    monkeypatch.setattr(doctor, "bitlocker_status", lambda: (None, "no powershell"))
+    check = {c.name: c for c in doctor.run_all()}["encryption at rest"]
+    assert check.ok
+    assert doctor.disk_is_encrypted() is None
+
+
+def test_the_probe_reads_status_and_never_changes_it():
+    """Turning encryption on is a system security change and is the owner's to make. This
+    code may only ever look."""
+    import inspect
+
+    source = inspect.getsource(doctor.bitlocker_status)
+    assert "Get-BitLockerVolume" in source
+    for mutation in ("Enable-BitLocker", "Disable-BitLocker", "manage-bde", "Resume-BitLocker"):
+        assert mutation not in source
+
+
+def test_remember_refuses_on_an_unencrypted_disk(monkeypatch):
+    from yoyo import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.doctor, "disk_is_encrypted", lambda: False)
+    monkeypatch.setattr(
+        "yoyo.memory.sources.remember",
+        lambda **k: pytest.fail("must not store transcripts on an unencrypted disk"),
+    )
+    result = runner.invoke(cli_mod.app, ["remember"])
+    assert result.exit_code == 3
+
+
+def test_memory_build_refuses_on_an_unencrypted_disk(monkeypatch):
+    from yoyo import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.doctor, "disk_is_encrypted", lambda: False)
+    result = runner.invoke(cli_mod.app, ["memory", "build"])
+    assert result.exit_code == 3
+    assert "not encrypted" in result.output.lower()
+
+
+def test_force_is_the_documented_way_to_test_on_throwaway_content(monkeypatch):
+    """Testing on throwaway content was always allowed. Typing --force is the point: the
+    refusal is a gate, not a lock."""
+    from yoyo import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.doctor, "disk_is_encrypted", lambda: False)
+    called = {"n": 0}
+
+    def fake_remember(**_kwargs):
+        called["n"] += 1
+        from yoyo.memory.sources import RememberReport
+
+        return RememberReport()
+
+    monkeypatch.setattr("yoyo.memory.sources.remember", fake_remember)
+    result = runner.invoke(cli_mod.app, ["remember", "--force"])
+    assert result.exit_code == 0
+    assert called["n"] == 1
+
+
+def test_an_encrypted_disk_does_not_prompt_at_all(monkeypatch):
+    from yoyo import cli as cli_mod
+
+    monkeypatch.setattr(cli_mod.doctor, "disk_is_encrypted", lambda: True)
+    from yoyo.memory.sources import RememberReport
+
+    monkeypatch.setattr("yoyo.memory.sources.remember", lambda **k: RememberReport())
+    result = runner.invoke(cli_mod.app, ["remember"])
+    assert result.exit_code == 0
+    assert "not encrypted" not in result.output.lower()
+
+
+def test_an_access_denied_probe_says_how_to_get_a_real_answer(monkeypatch):
+    """Observed on the owner's machine: `Get-CimInstance : Access denied`. The check cannot
+    read BitLocker without elevation — no probe can, the API is privileged — so the useful
+    output is the instruction, not a shrug."""
+    monkeypatch.setattr(doctor, "bitlocker_status", lambda: (None, "status unknown — "
+                        "reading BitLocker needs an ELEVATED PowerShell. Run `yoyo doctor` "
+                        "from a shell started with 'Run as administrator'"))
+    check = {c.name: c for c in doctor.run_all()}["encryption at rest"]
+    assert check.ok
+    assert "elevated" in check.detail.lower()
+
+
+def test_an_unconfirmable_disk_warns_before_proceeding(monkeypatch):
+    """The branch the owner's machine actually lands in. It must not look like silence."""
+    from yoyo import cli as cli_mod
+    from yoyo.memory.sources import RememberReport
+
+    monkeypatch.setattr(cli_mod.doctor, "disk_is_encrypted", lambda: None)
+    monkeypatch.setattr("yoyo.memory.sources.remember", lambda **k: RememberReport())
+    result = runner.invoke(cli_mod.app, ["remember"])
+    assert result.exit_code == 0
+    assert "could not confirm" in result.output.lower()
+    assert "elevated" in result.output.lower()

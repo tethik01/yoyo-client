@@ -42,9 +42,28 @@ def temp_db(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def ui_token(tmp_path, monkeypatch) -> str:
+    """A per-test token file, so the suite never touches the real one."""
+    from yoyo import auth
+
+    path = tmp_path / "ui-token"
+    monkeypatch.setattr(auth, "token_path", lambda: path)
+    return auth.read_or_create_token(path)
+
+
 @pytest.fixture()
-def client() -> TestClient:
-    return TestClient(api.app)
+def client(ui_token) -> TestClient:
+    """Authenticated by default.
+
+    Write routes now require a token header — see `auth.py` for why loopback is not a
+    boundary. These tests are about the routes' behaviour, so they carry the token as the
+    real UI does; the boundary itself is tested in `test_jobs_and_auth.py`, which is where
+    an unauthenticated POST belongs.
+    """
+    from yoyo import auth
+
+    return TestClient(api.app, headers={auth.TOKEN_HEADER: ui_token})
 
 
 @pytest.fixture()

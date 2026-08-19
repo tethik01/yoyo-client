@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import extract, schema, wiki
+from . import sources as sources_mod
 from .wiki import Claim, Page
 
 log = logging.getLogger(__name__)
@@ -47,10 +48,15 @@ class BuildReport:
     pages_written: int = 0
     flagged: int = 0
     ambiguities: list[dict[str, Any]] = field(default_factory=list)
+    #: The pages this run produced. Populated on every run, but only a dry run has any
+    #: reason to read them — on a real run they are already on disk and the file is canon.
+    pages: list[Any] = field(default_factory=list)
+    dry_run: bool = False
 
     def summary(self) -> str:
         return (
-            f"sources={self.sources} proposed={self.proposed} accepted={self.accepted} "
+            ("DRY RUN — nothing written. " if self.dry_run else "")
+            + f"sources={self.sources} proposed={self.proposed} accepted={self.accepted} "
             f"rejected={len(self.rejected)} pages={self.pages_written} "
             f"contradictions_flagged={self.flagged} ambiguous={len(self.ambiguities)}"
         )
@@ -138,24 +144,152 @@ def block_for(page: Page) -> str:
 # ------------------------------------------------------------------------ build ---
 
 
+def evidence_from(source_id: str, text: str) -> str:
+    """The part of a raw source that may be quoted as evidence about the owner's life.
+
+    For a **conversation**, that is the owner's turns only. For a **note the owner wrote**,
+    it is the whole file. The distinction is who authored the words: a vault note is the
+    owner's prose, a transcript is half his and half the model's.
+
+    Found by running it, 2026-08-15. Two real conversations produced six pages — World
+    War I, the Abraham Accords, Gaza — every quote verifying, nothing rejected. The claims
+    were quotes of *Yoyo explaining geopolitics*, filed as things to remember. The gates
+    held; the input was wrong. `sources.render`'s own docstring had predicted it a day
+    earlier ("that ambiguity is exactly how a model's guess gets quoted back as the owner's
+    decision") and the pipeline did it anyway, which is the argument for dry runs over
+    reasoning about what a system will probably do.
+    """
+    if source_id.startswith(sources_mod.SOURCE_PREFIX):
+        return sources_mod.owner_turns_only(text)
+    return text
+
+
+def extract_and_verify(
+    sources: dict[str, str], role: str = "extract"
+) -> tuple[list[Claim], list[tuple[str, str]]]:
+    """The read half of a build: propose claims, keep only the provable ones.
+
+    Split out so the review queue and the writer can share it. Nothing here touches the
+    vault, which is what makes it safe to run on a schedule.
+    """
+    # A memory must quote something the OWNER said. Yoyo's half of a transcript is dropped
+    # before extraction ever sees it — see `evidence_from()` for what this cost to learn.
+    evidence = {sid: evidence_from(sid, text) for sid, text in sources.items()}
+
+    proposed: list[Claim] = []
+    for source_id, text in evidence.items():
+        if not text.strip():
+            continue
+        proposed.extend(extract.from_source(source_id, text, role=role))
+
+    # Verified against the SAME text extraction saw. Verifying against the full transcript
+    # would re-open the hole: a quote of Yoyo would pass the check while being exactly the
+    # thing the split is there to exclude.
+    verified = wiki.verify(proposed, evidence)
+    for claim, why in verified.rejected:
+        log.info("rejected claim about %r: %s", claim.subject, why)
+    return verified.accepted, [(c.subject or "?", why) for c, why in verified.rejected]
+
+
+def propose_for_review(sources: dict[str, str], role: str = "extract") -> dict[str, Any]:
+    """Extract, verify, and QUEUE — writing nothing to the vault.
+
+    This is the path the UI uses. The gates decide what is traceable; the owner decides what
+    is worth keeping, and until he has, a claim lives in a table rather than in his notes.
+    """
+    from . import review
+
+    accepted, rejected = extract_and_verify(sources, role=role)
+    queued = review.propose(accepted)
+    return {
+        "sources": len(sources), "accepted": len(accepted), "rejected": rejected,
+        "queued": queued.proposed, "already_pending": queued.already_pending,
+        "previously_decided": queued.already_decided,
+        "ambiguities": find_ambiguities(accepted, {}),
+    }
+
+
+def apply_approved(root: Path | None = None) -> dict[str, Any]:
+    """Write the claims you approved, and only those.
+
+    The single write path into `yoyo-memory/`. Everything else — extraction, verification,
+    queueing — is a proposal; this is the step where something becomes memory.
+    """
+    from .. import vault as vault_mod
+    from . import review
+
+    root = root or vault_mod.vault_root()
+    claims = review.approved_claims()
+    if not claims:
+        return {"pages": 0, "claims": 0, "flagged": 0}
+
+    report = write_pages(claims, root)
+    written = review.mark_written(claims)
+    wiki.append_log(root, "apply", {
+        "claims": written, "pages": report["pages"], "flagged": report["flagged"],
+    })
+    return {**report, "claims": written}
+
+
+def write_pages(claims: list[Claim], root: Path) -> dict[str, Any]:
+    """Group claims into pages and write them, reconciling with what is already there.
+
+    Never overwrites: prior claims survive, duplicates collapse, and possible
+    contradictions are flagged rather than resolved.
+    """
+    existing = load_pages(root)
+    pages = wiki.group(claims)
+    flagged = 0
+    for page in pages:
+        prior = existing.get((page.kind, page.subject.lower()))
+        if prior:
+            page.claims, n = reconcile(prior, page.claims)
+            flagged += n
+        write_page(root, page)
+    write_index(root)
+    schema.write(root)
+    return {"pages": len(pages), "flagged": flagged}
+
+
 def build(
     sources: dict[str, str],
     root: Path | None = None,
     aliases: dict[str, str] | None = None,
     role: str = "extract",
+    dry_run: bool = False,
 ) -> BuildReport:
-    """Extract from raw sources and write the wiki. `sources` maps id -> full text."""
+    """Extract from raw sources and write the wiki. `sources` maps id -> full text.
+
+    `dry_run=True` does **everything except write**: extract, verify every quote, resolve
+    identity, reconcile against what is already on disk, and report. Nothing is created,
+    nothing is appended, and the memory log stays untouched.
+
+    This exists because the open question about memory is not "does it work" — the gates
+    answer that — but **"is what it extracts worth keeping"**. A claim can quote its source
+    perfectly and still be a fact about a conversation rather than about a person. The only
+    way to find out is to look at a real run's output, and the owner should not have to
+    write pages about his family to his vault in order to look.
+    """
     from .. import vault as vault_mod
 
     root = root or vault_mod.vault_root()
-    report = BuildReport(sources=len(sources))
+    report = BuildReport(sources=len(sources), dry_run=dry_run)
+
+    # A memory must quote something the OWNER said. Yoyo's half of a transcript is dropped
+    # before extraction ever sees it — see `evidence_from()` for what this cost to learn.
+    evidence = {sid: evidence_from(sid, text) for sid, text in sources.items()}
 
     proposed: list[Claim] = []
-    for source_id, text in sources.items():
+    for source_id, text in evidence.items():
+        if not text.strip():
+            continue
         proposed.extend(extract.from_source(source_id, text, role=role))
     report.proposed = len(proposed)
 
-    verified = wiki.verify(proposed, sources)
+    # Verified against the SAME text extraction saw. Verifying against the full transcript
+    # would re-open the hole: a quote of Yoyo would pass the check while being exactly the
+    # thing the split is there to exclude.
+    verified = wiki.verify(proposed, evidence)
     report.accepted = len(verified.accepted)
     report.rejected = [(c.subject or "?", why) for c, why in verified.rejected]
     for claim, why in verified.rejected:
@@ -170,8 +304,16 @@ def build(
         if prior:
             page.claims, flagged = reconcile(prior, page.claims)
             report.flagged += flagged
-        write_page(root, page)
+        if not dry_run:
+            write_page(root, page)
         report.pages_written += 1
+    report.pages = pages
+
+    if dry_run:
+        # No index, no schema, and above all no log line. A dry run that logged would put a
+        # record of a build that never happened into the append-only file whose whole value
+        # is being an accurate record.
+        return report
 
     write_index(root)
     schema.write(root)

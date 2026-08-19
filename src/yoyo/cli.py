@@ -1165,10 +1165,52 @@ def web_egress(limit: int = typer.Option(30)) -> None:
     console.print(f"[dim]{web_mod.egress_log_path()}[/]")
 
 
+def _require_encrypted_disk(what: str, force: bool) -> None:
+    """The owner's own condition, enforced by the machine instead of by memory.
+
+    The agreed gate was "BitLocker before real data goes in". A gate that lives in a README
+    row and in someone's head does not hold at 11pm three weeks later, when the command is
+    routine and the reason it existed has faded. So the two commands that put personal
+    material on this disk check, and stop.
+
+    It **stops**, it does not silently proceed with a warning — a warning printed above a
+    green summary line is a warning nobody reads twice. `--force` is there because testing
+    on throwaway content is legitimate and was always allowed; typing it is the point.
+
+    UNKNOWN status proceeds. Refusing to work because a check could not run would be
+    punishing the user for an elevated-shell requirement, and this is a gate, not a lock.
+    """
+    encrypted = doctor.disk_is_encrypted()
+    if encrypted is None:
+        # Observed 2026-08-15: on a normal PowerShell the BitLocker probe returns "Access
+        # denied", so this branch — not the refusal — is what the owner's machine actually
+        # hits. A gate that silently waves through the case it always lands in is not a
+        # gate. It still proceeds (unknown is not evidence of absence) but it says so, so
+        # "I never saw a warning" cannot be mistaken for "it checked and was happy".
+        console.print(
+            "[yellow]Could not confirm this disk is encrypted[/] "
+            "[dim](BitLocker status needs an elevated shell — run `yoyo doctor` as "
+            "administrator to check). Proceeding.[/]"
+        )
+        return
+    if encrypted:
+        return
+    console.print(f"[red]Refusing to {what} — this disk is not encrypted.[/]\n")
+    console.print(doctor.ENCRYPTION_WARNING)
+    console.print(
+        "\n[dim]This is the condition you set yourself: BitLocker before real data goes in.\n"
+        "Testing on throwaway content is fine — re-run with --force.[/]"
+    )
+    if not force:
+        raise typer.Exit(3)
+    console.print("\n[yellow]--force given; continuing on an unencrypted disk.[/]\n")
+
+
 @app.command()
 def remember(
     conversation: Optional[int] = typer.Option(None, help="One conversation id; default all"),  # noqa: UP045
     min_turns: int = typer.Option(1, help="Skip conversations shorter than this"),
+    force: bool = typer.Option(False, "--force", help="Proceed even on an unencrypted disk"),
 ) -> None:
     """Make past conversations searchable — Phase 1 of memory.
 
@@ -1177,6 +1219,7 @@ def remember(
     and this is what a raw source is.
     """
     _setup_logging()
+    _require_encrypted_disk("store transcripts of your conversations", force)
     from .memory import sources as memory_sources
 
     report = memory_sources.remember(
@@ -1198,6 +1241,10 @@ app.add_typer(memory_app, name="memory")
 def memory_build(
     conversation: Optional[int] = typer.Option(None, help="One conversation; default all"),  # noqa: UP045
     notes: bool = typer.Option(True, help="Also read your own vault notes"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be written. Writes nothing."
+    ),
+    force: bool = typer.Option(False, "--force", help="Proceed even on an unencrypted disk"),
 ) -> None:
     """Write memory pages from raw sources.
 
@@ -1205,6 +1252,11 @@ def memory_build(
     Those two gates are why this can run without asking your permission first.
     """
     _setup_logging()
+    # A dry run writes nothing, so the encryption gate does not apply to it. Blocking the
+    # one command that lets you INSPECT memory before trusting it would push you toward
+    # running the real thing to find out what it does.
+    if not dry_run:
+        _require_encrypted_disk("write pages about the people in your life", force)
     from . import vault as vault_mod
     from .memory import build as build_mod
     from .memory import sources as source_mod
@@ -1230,8 +1282,23 @@ def memory_build(
         raise typer.Exit(0)
 
     console.print(f"[dim]reading {len(raw)} raw source(s)…[/]")
-    report = build_mod.build(raw)
-    console.print(f"[green]{report.summary()}[/]")
+    report = build_mod.build(raw, dry_run=dry_run)
+    console.print(f"[{'yellow' if dry_run else 'green'}]{report.summary()}[/]")
+
+    if dry_run:
+        # Print the claims themselves, not just counts. The question a dry run exists to
+        # answer — "is this worth keeping?" — cannot be answered by a number, and a claim
+        # is only judgeable next to the quote it rests on.
+        for page in report.pages:
+            console.print(f"\n[bold]{escape(page.subject)}[/] [dim]({page.kind}) → "
+                          f"{escape(page.path)}[/]")
+            for claim in page.claims:
+                console.print(f"  • {escape(claim.claim)}")
+                console.print(f"    [dim]{escape(claim.source)} — "
+                              f"\"{escape(claim.quote.strip()[:160])}\"[/]")
+        if not report.pages:
+            console.print("[dim]Nothing proposed. For a real conversation that is a "
+                          "finding, not a bug — read it as 'no durable facts here'.[/]")
 
     for subject, why in report.rejected[:10]:
         console.print(f"[yellow]rejected[/] {escape(subject)}: {escape(why)}")
@@ -1274,6 +1341,101 @@ def memory_show(subject: Optional[str] = typer.Argument(None)) -> None:  # noqa:
             console.print(f"    [dim]{escape(claim.source)} — \"{escape(claim.quote)}\"[/]")
         return
     console.print(f"[yellow]No memory page for {escape(subject)}.[/]")
+
+
+@memory_app.command("review")
+def memory_review(
+    limit: int = typer.Option(50, help="How many pending claims to show"),
+) -> None:
+    """Claims waiting for your decision, with the quote each one rests on.
+
+    The gates prove a claim is traceable. Only you can say whether it is worth keeping —
+    six pages of world history passed every gate on the first real run.
+    """
+    _setup_logging()
+    from .memory import review as review_mod
+
+    rows = review_mod.pending(limit=limit)
+    stats = review_mod.stats()
+    if not rows:
+        console.print("[dim]Nothing pending. Run `yoyo memory propose` first.[/]")
+    subject = None
+    for row in rows:
+        if row["subject"] != subject:
+            subject = row["subject"]
+            console.print(f"\n[bold]{escape(subject)}[/] [dim]({row['kind']})[/]")
+        console.print(f"  [cyan]#{row['id']}[/] {escape(row['claim'])}")
+        console.print(f"      [dim]{escape(row['source'])} — "
+                      f"\"{escape((row['quote'] or '')[:140])}\"[/]")
+    console.print(f"\n[dim]{stats}[/]")
+    console.print("[dim]Decide in the UI (Memory tab), or `yoyo memory decide <id> "
+                  "--reject`.[/]")
+
+
+@memory_app.command("propose")
+def memory_propose(notes: bool = typer.Option(True, help="Also read your own vault notes")) -> None:
+    """Extract and queue claims for review. Writes nothing to the vault."""
+    _setup_logging()
+    from . import vault as vault_mod
+    from .memory import build as build_mod
+    from .memory import sources as source_mod
+
+    raw: dict[str, str] = {}
+    for row in core.list_conversations(limit=1000):
+        cid = int(row["id"])
+        text, turns, _ = source_mod.render(cid, row.get("title"),
+                                           core.conversation_messages(cid))
+        if turns:
+            raw[source_mod.source_path(cid)] = text
+    if notes:
+        root = vault_mod.vault_root()
+        for note in vault_mod._notes(root):
+            raw[f"vault://{vault_mod._rel(note, root)}"] = note.read_text(
+                encoding="utf-8", errors="replace")
+
+    console.print(f"[dim]reading {len(raw)} raw source(s)…[/]")
+    report = build_mod.propose_for_review(raw)
+    console.print(f"[green]queued {report['queued']} new claim(s)[/] "
+                  f"[dim](accepted={report['accepted']} "
+                  f"already_pending={report['already_pending']} "
+                  f"previously_decided={report['previously_decided']})[/]")
+    console.print("[dim]Review them: `yoyo memory review`[/]")
+
+
+@memory_app.command("decide")
+def memory_decide(
+    proposal_id: int = typer.Argument(..., help="Proposal id from `yoyo memory review`"),
+    reject: bool = typer.Option(False, "--reject", help="Reject instead of approving"),
+) -> None:
+    """Approve or reject one proposed claim. Rejection is permanent — it is never re-asked."""
+    _setup_logging()
+    from .memory import review as review_mod
+
+    status = "rejected" if reject else "approved"
+    if review_mod.decide(proposal_id, status):
+        console.print(f"[green]#{proposal_id} {status}[/]")
+    else:
+        console.print(f"[yellow]#{proposal_id} was already decided, or does not exist[/]")
+
+
+@memory_app.command("apply")
+def memory_apply(
+    force: bool = typer.Option(False, "--force", help="Proceed even on an unencrypted disk"),
+) -> None:
+    """Write the claims you approved. The only path from a proposal to a page."""
+    _setup_logging()
+    _require_encrypted_disk("write pages about the people in your life", force)
+    from .memory import build as build_mod
+
+    result = build_mod.apply_approved()
+    if not result["claims"]:
+        console.print("[yellow]Nothing approved yet — `yoyo memory review` first.[/]")
+        return
+    console.print(f"[green]wrote {result['claims']} claim(s) across "
+                  f"{result['pages']} page(s)[/]")
+    if result.get("flagged"):
+        console.print(f"[yellow]{result['flagged']} possible contradiction(s) flagged — "
+                      f"both claims kept, neither resolved[/]")
 
 
 @memory_app.command("forget")

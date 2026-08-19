@@ -12,7 +12,10 @@ def conn(tmp_path):
 
 
 def test_migration_sets_version(conn):
-    assert db.current_version(conn) == 1
+    """Derived from the files on disk, not hardcoded. A literal here means every new
+    migration breaks a test that has nothing to do with the change."""
+    highest = max(int(f.name.split("_", 1)[0]) for f in db.MIGRATIONS_DIR.glob("*.sql"))
+    assert db.current_version(conn) == highest
 
 
 def test_migration_is_idempotent(tmp_path):

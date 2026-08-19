@@ -151,3 +151,42 @@ cases:
       that anything was decided. Whatever is extracted must quote this text verbatim, which
       makes "Sarah is a colleague" impossible to state — there is no sentence to quote for
       it. No must_find: an empty result is also a correct result here.
+
+  - id: extraction-ignores-world-knowledge
+    kind: extraction
+    hard_gate: true
+    role: extract
+    expect_empty: true
+    source_id: "conversation://eval-4"
+    source: |
+      ## Bhavin · 2026-08-15T20:04:00Z
+
+      Can you explain the West Asia conflict to me in simple terms? I keep reading about it
+      and I do not follow how the alliances fit together.
+
+      ## Yoyo · 2026-08-15T20:04:20Z
+
+      The current West Asia conflict involves regional and global powers supporting
+      different sides, from the unresolved Israeli-Palestinian conflict continuing decades
+      after key events like the 1948 war, to the current siege and ground operations in
+      Gaza. Regional alliances like the Abraham Accords matter here. The pattern echoes
+      WWI, where European empires competed for colonies, and the Treaty of Versailles
+      creating resentment that helped fuel WWII.
+    notes: >-
+      THE REGRESSION CASE. This is a real run, 2026-08-15: a dry build over two
+      conversations produced six pages — World War I, World War II, the West Asia conflict,
+      Gaza, the Abraham Accords, the Israeli-Palestinian conflict — with 8/8 claims
+      accepted, 0 rejected and every quote verifying. A flawless run by every number the
+      build reports, and worthless as a second brain.
+
+      Two separate failures, both visible here:
+
+      1. Every quote came from YOYO's turn, not Bhavin's. Half of a transcript is model
+         output, and "a claim must quote a raw source" never said whose words the source
+         contained. `build.evidence_from()` now strips the assistant's half before
+         extraction sees it, so the eval runner does too.
+      2. Even the user's turn holds no durable fact. "Can you explain X" is a question, and
+         curiosity about a news topic is not a memory. General knowledge is never a memory:
+         if a fact would be equally true for a stranger, it says nothing about its owner.
+
+      Correct output: ZERO claims.

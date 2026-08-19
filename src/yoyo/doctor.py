@@ -29,6 +29,7 @@ def run_all() -> list[Check]:
     _sqlite(checks)
     _qdrant(checks)
     _vault(checks)
+    _encryption(checks)
     _optional_configs(checks)
     return checks
 
@@ -224,6 +225,124 @@ def _vault(checks: list[Check]) -> None:
         # scaffold rather than the real thing.
         detail += "  [looks like the test scaffold, not a real Obsidian vault]"
     checks.append(Check("vault", True, detail))
+
+
+#: Volume states BitLocker reports. Only one of these means the data at rest is protected.
+_ENCRYPTED = "fullyencrypted"
+_IN_PROGRESS = ("encryptioninprogress", "decryptioninprogress")
+
+
+def bitlocker_status() -> tuple[str | None, str]:
+    """(status, why) — the raw BitLocker VolumeStatus for C:, or None if it cannot be read.
+
+    Split out from the check so other commands can ask the same question. `None` means
+    UNKNOWN, which is deliberately not the same as unencrypted: reporting an absence you
+    have not established is the failure this project has caught six variants of, and it
+    would be a poor place to start a seventh.
+    """
+    import platform
+    import shutil
+    import subprocess
+
+    if platform.system() != "Windows":
+        return None, f"not checked on {platform.system()} — this check is BitLocker-specific"
+
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return None, "cannot check — powershell not found"
+
+    try:
+        # `-MountPoint C:` only. The corpus, SQLite, tokens and vault all live on C:; a
+        # per-volume report of every drive would bury the one answer that matters.
+        proc = subprocess.run(  # noqa: S603
+            [powershell, "-NoProfile", "-NonInteractive", "-Command",
+             "(Get-BitLockerVolume -MountPoint C:).VolumeStatus"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"could not check: {exc}"
+
+    status = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not status:
+        # Get-BitLockerVolume reads WMI's MicrosoftVolumeEncryption namespace, which
+        # requires elevation. Observed on the owner's machine 2026-08-15:
+        # "Get-CimInstance : Access denied". So on a normal PowerShell this returns UNKNOWN
+        # every single time — which means a gate that treats unknown as "carry on" is a
+        # gate that never fires on the one machine it was written for.
+        #
+        # There is no unelevated way to read BitLocker's volume status; the API is
+        # privileged by design. So the honest fix is not a cleverer probe, it is saying
+        # loudly that the check could not run, and how to make it run.
+        first = (proc.stderr or "").strip().splitlines()
+        denied = any("denied" in line.lower() for line in first)
+        why = (
+            "status unknown — reading BitLocker needs an ELEVATED PowerShell. "
+            "Run `yoyo doctor` from a shell started with 'Run as administrator' to get a "
+            "real answer."
+            if denied else
+            "status unknown — Get-BitLockerVolume is unavailable (this Windows edition may "
+            "lack it)"
+        )
+        if first:
+            why += f" [{first[0][:120]}]"
+        return None, why
+    return status, ""
+
+
+def disk_is_encrypted() -> bool | None:
+    """True / False / None-for-unknown. The tri-state is the point."""
+    status, _ = bitlocker_status()
+    if status is None:
+        return None
+    return status.replace(" ", "").lower() == _ENCRYPTED
+
+
+ENCRYPTION_WARNING = (
+    "This disk is NOT encrypted. The corpus, SQLite, your LiteLLM key, mail and calendar "
+    "refresh tokens, and everything memory writes are plaintext on it.\n"
+    "Turn it on: Settings > Privacy & security > Device encryption — and store the recovery "
+    "key somewhere that is not this laptop."
+)
+
+
+def _encryption(checks: list[Check]) -> None:
+    """Is the disk holding all of this actually encrypted? (OQ4)
+
+    This check exists because OQ4 has been tracked in a README row and in the owner's head
+    for three days, and neither of those fails a build. Every component added since has
+    widened it: a LiteLLM key, then mail refresh tokens, then calendar tokens, then audio,
+    and now a verbatim transcript of every conversation plus structured pages about the
+    people in the owner's life. "Test data only" is a condition someone has to keep
+    remembering — a check is a condition the machine keeps.
+
+    **A FAIL here is correct and deliberate.** Doctor is the thing you run before believing
+    anything works, and unencrypted is the state in which memory should not be trusted with
+    real material. It reads status only; turning encryption on is a system security change
+    and is the owner's to make, in Windows, with the recovery key stored off the laptop.
+
+    Unknown states pass rather than fail: a Linux CI box has a different answer to this
+    question, and a check that fails everywhere gets ignored everywhere.
+    """
+    status, why = bitlocker_status()
+    if status is None:
+        # Still a PASS: unknown is not evidence of absence, and a check that fails on every
+        # non-Windows box and every unelevated shell gets ignored everywhere. But it must
+        # not read like a clean bill of health — the detail string carries the instruction.
+        checks.append(Check("encryption at rest", True, why))
+        return
+
+    normalised = status.replace(" ", "").lower()
+    if normalised == _ENCRYPTED:
+        checks.append(Check("encryption at rest", True, f"BitLocker: {status} (OQ4 closed)"))
+        return
+    if normalised in _IN_PROGRESS:
+        checks.append(Check("encryption at rest", False,
+                            f"BitLocker: {status} — in progress, not yet protecting anything. "
+                            f"Wait for it to finish before ingesting real material."))
+        return
+
+    checks.append(Check("encryption at rest", False,
+                        f"BitLocker: {status} — OQ4 is OPEN. " + ENCRYPTION_WARNING))
 
 
 def _optional_configs(checks: list[Check]) -> None:

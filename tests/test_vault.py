@@ -194,3 +194,76 @@ def test_blank_vault_path_is_treated_as_unset(monkeypatch, blank):
     monkeypatch.setattr(get_settings(), "vault_path", None, raising=False)
     with pytest.raises(vault.VaultError, match="No vault configured"):
         vault.vault_root()
+
+
+# ------------------------ memory pages: on the map, never in search (2026-08-15) ---
+# The hole: extraction refused to read `yoyo-memory/` from day one, so a wiki page could
+# never become evidence at WRITE time. Nothing stopped `vault_search` finding those pages at
+# READ time and handing them to the model as "your notes" — the same circularity through the
+# other door, and undetectable, because the quote really is in the file.
+
+
+def _memory_vault(tmp_path):
+    (tmp_path / "Trip.md").write_text("Lisbon in March.\n", encoding="utf-8")
+    mem = tmp_path / vault.MEMORY_DIR / "people"
+    mem.mkdir(parents=True)
+    (mem / "Priya.md").write_text(
+        "---\nabout: Priya\nkind: person\n---\n\nPriya is flying to Lisbon.\n",
+        encoding="utf-8",
+    )
+    drafts = tmp_path / vault.DRAFTS_DIR
+    drafts.mkdir()
+    (drafts / "Draft.md").write_text("Lisbon draft\n", encoding="utf-8")
+    return tmp_path
+
+
+def test_search_cannot_see_yoyo_written_memory_pages(tmp_path, monkeypatch):
+    root = _memory_vault(tmp_path)
+    monkeypatch.setattr(vault, "vault_root", lambda: root)
+    hits = vault.search("Lisbon")
+    paths = [h.path for h in hits]
+    assert any("Trip" in p for p in paths), "the owner's own note must still be findable"
+    assert not any(vault.MEMORY_DIR in p for p in paths)
+    assert not any(vault.DRAFTS_DIR in p for p in paths)
+
+
+def test_listing_notes_excludes_memory_pages(tmp_path, monkeypatch):
+    root = _memory_vault(tmp_path)
+    monkeypatch.setattr(vault, "vault_root", lambda: root)
+    assert [n.title for n in vault.list_notes()] == ["Trip"]
+
+
+def test_the_map_still_shows_memory_pages_and_marks_them(tmp_path, monkeypatch):
+    """Drawing a node is not citing it. The map is the whole reason the memory exists in a
+    vault rather than a database, so excluding it there would defeat the point."""
+    root = _memory_vault(tmp_path)
+    monkeypatch.setattr(vault, "vault_root", lambda: root)
+    g = vault.graph()
+    by_title = {n["title"]: n for n in g["nodes"]}
+    assert "Priya" in by_title
+    assert by_title["Priya"]["generated"] is True
+    assert by_title["Trip"]["generated"] is False
+    assert g["stats"]["generated"] == 1
+
+
+def test_drafts_stay_out_of_the_map_as_before(tmp_path, monkeypatch):
+    """Memory pages are reviewed output; drafts are unreviewed. Only one of them earns a
+    place on the map."""
+    root = _memory_vault(tmp_path)
+    monkeypatch.setattr(vault, "vault_root", lambda: root)
+    assert "Draft" not in [n["title"] for n in vault.graph()["nodes"]]
+
+
+def test_the_two_modules_agree_on_the_folder_name():
+    """Two spellings of one folder name is how an exclusion silently stops excluding."""
+    from yoyo.memory import wiki
+
+    assert vault.MEMORY_DIR == wiki.WIKI_DIR
+
+
+def test_stats_counts_memory_pages_separately(tmp_path, monkeypatch):
+    root = _memory_vault(tmp_path)
+    monkeypatch.setattr(vault, "vault_root", lambda: root)
+    st = vault.stats()
+    assert st["notes"] == 1, "Yoyo's pages are not notes the owner wrote"
+    assert st["memory_pages"] == 1

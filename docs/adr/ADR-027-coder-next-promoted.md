@@ -33,3 +33,36 @@ role makes Ollama return 500. Three models now compete for two
 because thinking is on and it spends its output on reasoning traces — measured 8.5 s vs
 23.0 s on the same eval case. `fast` is retained as `answer_fast`; revisit when
 `think: false` lands server-side.
+
+
+## Addendum, 2026-08-15 (later) — the 1.09x was wrong
+
+Re-measured with `yoyo bench --role supervisor --concurrency 1,4 --repeats 3`, after
+`OLLAMA_MAX_LOADED_MODELS=3` and `OLLAMA_KEEP_ALIVE=30m` were set on the box:
+
+| | aggregate tok/s | per-stream tok/s | wall clock |
+|---|---|---|---|
+| concurrency 1 | 14.8 | 51.3 | 20.2 s |
+| concurrency 4 | **55.5** | 24.0 | 20.5 s |
+
+**3.75x. `coder` scales.** Four concurrent requests finish in the wall clock of one, and no
+429s were counted, so this is not a rate limit being misread.
+
+The table at the top of this ADR is left as recorded — it is what was measured that morning,
+and editing a measurement in place destroys the only evidence that the reading changed.
+
+**What this reverses.** The consequence drawn from 1.09x — "the graph loses its fan-out
+benefit on the default pins" — is withdrawn. `yoyo plan` fan-out buys real wall-clock on
+`coder`. This strengthens ADR-026's routing rule rather than changing it: multi-part
+questions already went to `plan` on *correctness* grounds, and they now also cost less than
+the serialisation figure implied.
+
+**What caused it is not established.** The plausible mechanism is eviction: 92 GB of weights
+against 121 GB usable, with Ollama's default 5-minute keep-alive, means a model can be
+unloaded between requests — so "the model serialises" and "the model was being reloaded" are
+indistinguishable from the client side. The original figure was a single trial; this one is
+three repeats. Neither fact proves the mechanism.
+
+**The lesson is ADR-022's, one level up.** Concurrency is empirical per *model* — and now
+also per *host configuration*. A scaling number is only valid for the box state it was taken
+on, and that state was never recorded alongside the number. It is now.

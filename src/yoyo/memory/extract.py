@@ -23,10 +23,17 @@ from .wiki import ENTITY_KINDS, Claim
 
 log = logging.getLogger(__name__)
 
-INSTRUCTION = """Extract durable facts about ENTITIES from the source below.
+INSTRUCTION = """Extract durable facts about the USER'S OWN LIFE from the source below.
 
-An entity is a person, place, project, topic, event or organisation that the user would
-still care about in six months.
+An entity is a person, place, project, topic, event or organisation **connected to the
+user** — someone they know, somewhere they go, something they are working on or planning —
+that they would still care about in six months.
+
+**General knowledge is never a memory.** If the fact would be equally true for a stranger,
+it does not belong here: the model already knows what the Treaty of Versailles was, and a
+personal memory system that files world history as things to remember about its owner has
+recorded nothing about its owner. The test is not "is this true" or "is this interesting",
+it is "does this tell me something about THIS PERSON".
 
 Rules — these are correctness requirements, not preferences:
 
@@ -39,6 +46,10 @@ Rules — these are correctness requirements, not preferences:
    relative, or that a trip is planned.
 3. Prefer FEWER, DURABLE facts. "Bhavin's sister is Priya" is durable. "Bhavin asked a
    question about Suno" is not — it is a fact about a conversation, not about an entity.
+   "World War I involved European empires competing for colonies" is not either — it is
+   true, it is quotable, and it says nothing about the user. Discard it.
+6. The source contains only what the USER said; the assistant's replies have already been
+   removed. Anything you cannot support from the user's own words does not exist.
 4. Skip anything about Yoyo itself, this software, or the conversation as an event.
 5. If the source contains no durable facts about entities, return an EMPTY list. An empty
    answer is a correct answer and is expected often.

@@ -7,9 +7,9 @@ This file is the **living status document**. Update it in the same commit as the
 describes; if it disagrees with the code, the file is the bug.
 
 - **Last updated:** 2026-08-15 (day 3, later)
-- **Phase:** Phase 0 complete on the critical path. Orchestration measured and settled.
-  Mail built but awaiting OAuth setup.
-- **Tests:** 718 passing
+- **Phase:** Phase 0 complete. Orchestration settled (ADR-026/027). Gmail live. All five
+  second-brain phases built (ADR-030) — **none of them exercised on real material yet.**
+- **Tests:** 791 passing
 - **Only gate on a real corpus:** OQ4 — the disk is not encrypted
 
 **Start here if you just want to USE it:** [`USER-GUIDE.md`](USER-GUIDE.md) — the three
@@ -66,9 +66,36 @@ Bake-off across four models; gpt-oss:120b dropped, vLLM deferred.
     the vault's checkboxes as structured tasks; read-only calendar sharing mail's OAuth app.
 14. **The docs made self-checking.** The owner found §2 still describing the pre-ADR-027
     world. `tests/test_readme_matches_code.py` now fails CI when this file disagrees with the
-    code, and all eight ADRs are mirrored into `docs/adr/` so a clone explains itself.
+    code, and every ADR is mirrored into `docs/adr/` so a clone explains itself.
+15. **Web search (ADR-029)** through the owner's SearXNG, with an SSRF gate checked after DNS
+    resolution, untrusted-content framing that deliberately does not strip injection attempts,
+    and an egress log. Prompt injection entered the threat model the same day.
+16. **The second brain, all five phases.** Conversations as verbatim raw sources; a wiki layer
+    whose two mechanical gates (verbatim quote, and no claim may cite another wiki page) are
+    what make automatic writing defensible; identity ambiguity asked rather than guessed;
+    contradictions flagged rather than resolved; and finally **intent routing and spoken
+    answers (ADR-030)** so the mode does not have to be chosen — routing that can only
+    over-serve, and always says what it picked.
+17. **Memory's model call gated.** `yoyo eval --only extraction` verifies every quote against
+    the real source and requires zero claims from a conversation containing no facts. The
+    layer whose failures compound is the layer that gets a gate.
 
 ### Bugs found by running it, not by reading it
+
+**2026-08-15 — memory extracted six pages of world history and passed every gate.** The
+owner's first real `yoyo memory build --dry-run` produced pages on World War I, World War II,
+the West Asia conflict, Gaza, the Abraham Accords and the Israeli-Palestinian conflict:
+8 proposed, 8 accepted, 0 rejected, 0 flagged, 0 ambiguous. Nothing was breached — the
+verbatim-quote gate held, the no-page-cites-a-page gate held. **The input was wrong.** Half
+of every conversation transcript is model output, and every accepted claim quoted *Yoyo
+explaining geopolitics to Bhavin*, which memory then filed as things to remember about
+Bhavin's life. `sources.render`'s own docstring had predicted this a day earlier — "that
+ambiguity is exactly how a model's guess gets quoted back as the owner's decision" — and the
+pipeline did it anyway. Fixed structurally: `build.evidence_from()` strips the assistant's
+turns before extraction sees them, verification runs against that same text so a quote of
+Yoyo cannot pass, and the extraction prompt now says general knowledge is never a memory.
+The run is a shipped regression case (`extraction-ignores-world-knowledge`). **This is the
+argument for dry runs over reasoning about what a system will probably do.**
 
 Recorded because each cost real time and would otherwise be rediscovered:
 
@@ -130,7 +157,7 @@ the GB10. Code names a **role**, never a model. **Audio never leaves the laptop*
 
 | Capability | Model | Speed | Tools | Concurrency | Thinking |
 |---|---|---|---|---|---|
-| `coder` | qwen3-coder-next 80B-A3B MoE | ~50 tok/s | **yes** — gates passed | 1.09× — serialises | none |
+| `coder` | qwen3-coder-next 80B-A3B MoE | ~50 tok/s | **yes** — gates passed | **3.75× @ 4** (corrected 2026-08-15; first read 1.09×) | none |
 | `agent` | muse-glimmer 27.9B dense Q4_K_M | ~12 tok/s | **yes** — gates passed | 3.76× @ 4 | controllable |
 | `fast` | qwen3.6 35B-A3B MoE | ~76 tok/s | **NEVER** | 1.13× — serialises | on, not switchable |
 
@@ -176,13 +203,13 @@ re-comparing once `think: false` is set on the server.
 |---|---|---|
 | Ollama + LiteLLM + Postgres, systemd | ✅ | survives reboot |
 | HTTPS over Tailscale | ✅ | verified from the laptop |
-| `agent`, `fast` and `coder` served | ✅ | `coder` added 2026-08-15 (ADR-027) |
+| `agent`, `fast` and `coder` served | ✅ | `coder` added 2026-08-15 (ADR-027); `ollama list` confirms three models, 92 GB of 121 GB usable |
 | Bake-off, four models | ✅ | `docs/model-baseline-gb10.md` |
 | qwen3-coder-next evaluated and promoted | ✅ | 7/7 gates, 50 tok/s — ADR-027 |
 | `think: false` on `fast` | ⬜ | assume thinking is on |
 | Embedding model (`bge-m3`) | ⬜ | not deployed — Yoyo embeds locally |
 | Reranker | ⬜ | not deployed |
-| Funnel off · DHCP reservation · key rate limits | ⬜ | housekeeping |
+| Funnel off · DHCP reservation · key rate limits | ✅ | 2026-08-15, owner-reported — not verifiable from the laptop |
 
 ### Yoyo laptop client
 
@@ -191,7 +218,7 @@ re-comparing once `think: false` is set on the server.
 | Config layer, role registry | ✅ | `config.py`, `yoyo-models.yaml` |
 | Tool-fidelity guard (raises, not warns) | ✅ | `llm.py::_guard_tools` |
 | LLM client: chat, stream, 429 backoff, reasoning capture | ✅ | `llm.py` |
-| `yoyo doctor` — 7 checks | ✅ | `doctor.py` |
+| `yoyo doctor` — 9 checks | ✅ | `doctor.py` |
 | SQLite schema, FTS5, citations | ✅ | `migrations/`, `storage/db.py` |
 | Local embeddings (fastembed, 768d) | ✅ | `embeddings.py` |
 | Qdrant vectors, no orphans | ✅ | `storage/vectors.py` |
@@ -199,28 +226,32 @@ re-comparing once `think: false` is set on the server.
 | Hybrid retrieval + RRF | ✅ | `rag/retrieve.py` |
 | Turn loop with citations | ✅ | `core.py` |
 | HTTP API + streaming | ✅ | `api.py` — `/ask/stream` covered against a mocked model |
-| Web UI | 🟡 | `static/index.html` — tool calls, clickable citations, conversation history |
+| Web UI | ✅ | `static/index.html` — four views, toasts on every failure, **browser smoke test** in `tests/ui/` |
+| UI write boundary (token + Origin) | ✅ | `auth.py` — loopback is not a security boundary; see §9 |
+| Job runner (long work, survives reload) | ✅ | `jobs.py`, `/jobs*` — doctor, eval, bench, ingest, remember, memory-build (dry run), backup |
 | Conversation memory | ✅ | agent and graph turns persisted; follow-ups replay prior turns |
 | Memory Phase 1 — conversations as raw sources | ✅ | `memory/sources.py`, `yoyo remember` |
+| Memory review queue (propose → decide → apply) | ✅ | `memory/review.py` — the gates prove traceable, you decide worth keeping |
 | Memory Phase 2 — wiki layer | 🟡 | `memory/wiki.py`, `memory/extract.py` — verbatim-quote + source-kind gates |
 | Memory Phase 3 — identity | 🟡 | aliases asked not guessed; enriches your own note in a marked block |
 | Memory Phase 4 — contradictions | 🟡 | recorded as edges, never resolved; `yoyo memory forget` |
 | Memory schema doc (governance) | ✅ | `yoyo-memory/SCHEMA.md`, regenerated each build |
+| Memory extraction eval gate | 🟡 | `yoyo eval --only extraction` — built, never run against the endpoint |
 | Memory Phase 5 — voice-first routing | 🟡 | `router.py` + `voice/speech.py` — `yoyo do`, `yoyo talk --mode auto`; engines still uninstalled |
 | Vault map (UI) | 🟡 | `/vault/graph` + hand-rolled force layout — corpus overlay, broken links kept |
 | Citation resolution endpoint | ✅ | `/citation/<id>` — chunks, mail and notes through one route |
-| CLI (48 commands) | ✅ | `cli.py` — documented in §6 |
+| CLI (52 commands) | ✅ | `cli.py` — documented in §6 |
 | Backup / restore drill | ✅ | `backup.py` — 11/11 on the real drive |
 | Tool registry, 4 built-ins | ✅ | `tools.py` |
 | Bounded agent loop | ✅ | `agent.py` — iteration + wall-clock budgets |
-| Golden eval set, 7 gates | ✅ | `evals/golden.yaml` — 7/7 live on `coder` |
+| Golden eval set, 10 cases | ✅ | `evals/golden.yaml` — 7/7 live on `coder`; the 3 extraction cases have **never been run live** |
 | Concurrency bench | ✅ | `bench.py` — distinct prompts, 429s counted separately |
 | Fabricated-citation scrubber | ✅ | `citations.py` — strips invented paths, CLI warns |
 | Untried-source hint in the agent loop | ✅ | `agent.py` — fixes source tunnelling |
 | MCP client adapter | ✅ | `mcp/client.py` |
 | Vault MCP server | ✅ | `mcp/vault_server.py` — drafts-only write |
 | Corpus MCP server | ✅ | `mcp/corpus_server.py` — live stdio round trip |
-| Mail MCP server (Gmail + M365) | 🟡 | `mail/`, `mcp/mail_server.py` — **needs OAuth setup** |
+| Mail MCP server (Gmail + M365) | ✅ | `mail/`, `mcp/mail_server.py` — Gmail authed and answering live; M365 registration not done |
 | Calendar adapters + MCP (read-only) | 🟡 | `calendar/`, `mcp/calendar_server.py` — enabled; awaiting `yoyo calendar auth` |
 | Tasks MCP over the vault | 🟡 | `tasks.py`, `mcp/tasks_server.py` — no credentials needed |
 | Filesystem MCP (third-party) | 🟡 | `yoyo-mcp.yaml` — read-only by allowlist, scoped to `Notes` |
@@ -230,106 +261,142 @@ re-comparing once `think: false` is set on the server.
 | STT — faster-whisper, local | 🟡 | `voice/whisper.py` — needs `pip install -e ".[voice]"` |
 | TTS — Piper + Windows SAPI | 🟡 | `voice/tts.py` — SAPI needs no download |
 | Push-to-talk (`yoyo talk`) | 🟡 | `voice/mic.py` — untested without a microphone |
-| Obsidian vault as canon | 🟡 | `C:\Projects\Yoyo\Notes` — real folder, one note so far |
+| Obsidian vault as canon | 🟡 | `C:\Projects\Yoyo\Notes` — real folder, one note so far; the map has nothing to draw until it has linked notes |
 | LangGraph supervisor graph | ✅ | `graph/supervisor.py` — plan → parallel workers → synthesise |
 | Orchestration baseline measured | ✅ | ADR-026, four rounds — `plan` wins multi-part |
 | README-vs-code consistency guard | ✅ | `tests/test_readme_matches_code.py` — this file fails CI when it lies |
-| ADR mirror in the repo | ✅ | `docs/adr/` — all eight; the project doc stays authoritative |
+| ADR mirror in the repo | ✅ | `docs/adr/` — all ten; the project doc stays authoritative |
 | Version control | ✅ | `tethik01/yoyo-client` — commits are manual |
 | PydanticAI | ❌ | rejected — structured output via `llm.py` instead |
 | Langfuse observability | ⬜ | |
 | Agent swarm | ⬜ | post-Phase 0 |
-| Encryption at rest | ❌ | **BitLocker off — see OQ4** |
+| Encryption at rest | ❌ | **BitLocker off — see OQ4.** Now *checked*: `yoyo doctor` fails on it, and `yoyo remember` / `yoyo memory build` refuse to run |
 | Egress auditing | 🟡 | web requests logged (`yoyo web egress`); everything else still unaudited — OQ5 |
 
 ---
 
 ## 4. Next
 
-In the order I'd take them.
+Everything on the roadmap is now **built**. What is left is almost entirely *running it* —
+and the gap between "built" and "proven" is where every bug in §1 came from.
 
-### 1. Turn on BitLocker — 10 minutes, unblocks everything else
-
-Settings → Privacy & security → Device encryption. **Save the recovery key somewhere that is
-not the laptop.** Then re-run `yoyo backup F:\yoyo-backups`.
-
-Why first: you're about to put mailbox refresh tokens on this disk. Everything below makes
-the unencrypted-disk problem worse, and this is the cheapest item on the list.
-
-### 2. Finish mail setup — your accounts, your consent
-
-**The largest gap between what is built and what is usable.** The code is done and tested;
-neither step below can be done for you, because both need account-level app registration and
-OAuth consent in your own browser.
-
-**Gmail** — Cloud Console → enable Gmail API → Credentials → OAuth client ID → *Desktop app*
-→ save JSON to `secrets\gmail-personal.json` → add yourself as a test user.
-
-**Microsoft** — Entra → App registrations → New → Authentication → *Allow public client
-flows: Yes* → API permissions → Graph → Delegated → `Mail.Read`, `Mail.ReadWrite`.
-**Do not add `Mail.Send`.** Copy the Application ID into `yoyo-mail.yaml`.
-
-**Do calendar in the same sitting.** It reuses the same registrations: enable the Google
-Calendar API on the same project, add delegated `Calendars.Read` to the same Entra app.
-Two extra clicks now, versus a whole second setup session later.
+### 1. Turn on BitLocker — 10 minutes, and Yoyo now stops until you do
 
 ```powershell
-uv pip install -e ".[dev,local-embed,mail,voice]"
-# yoyo-mail.yaml + yoyo-calendar.yaml: fill client_id, set enabled: true
-yoyo mail accounts
-yoyo mail auth personal
-yoyo mail auth work
-yoyo calendar auth personal
-yoyo calendar auth work
-yoyo mail search "invoice"
-yoyo calendar agenda --days 7
-# yoyo-mcp.yaml: mail.enabled: true, calendar.enabled: true, tasks.enabled: true
-yoyo agent "what did Alice send me about the invoice, and when is the review meeting?"
+Get-BitLockerVolume -MountPoint C:            # FullyDecrypted = unprotected
+# Settings > Privacy & security > Device encryption  (or Manage BitLocker on Pro)
+yoyo doctor                                    # "encryption at rest" must go green
+yoyo backup F:\yoyo-backups                    # re-run once encrypted
 ```
 
-### 3. Re-test the graph in its intended case
+**Save the recovery key somewhere that is not this laptop.** If Device encryption is absent,
+this is Windows Home — either upgrade to Pro for BitLocker, or accept that OQ4 stays open and
+keep memory on throwaway content only.
 
-ADR-026 is settled for **two local sources**. The graph has still never been measured on the
-case it was built for: mail **and** vault **and** corpus in one question. That test needs
-step 2 done first, and it is the one that decides whether decomposition earns its keep
-generally or only on this question shape.
+This stopped being a note and became a control on 2026-08-15: `yoyo doctor` **fails** on an
+unencrypted disk, and `yoyo remember` and `yoyo memory build` **refuse to run** (exit 3,
+`--force` to override for throwaway content). The gate was your own condition; it now lives
+in the machine instead of in your memory, because a condition in a README row does not hold
+at 11pm three weeks from now.
 
-### 4. Point the vault at real notes
+This was already the gate on real mail. It is now the gate on memory as well: `yoyo remember`
+puts a searchable transcript of every conversation on this disk, and `yoyo memory build` puts
+structured pages about the people in your life next to it. Everything below makes that worse.
+**Do not run either against real material until this is on** — that was the agreed condition.
 
-`YOYO_VAULT_PATH` currently points at `test-vault` (three notes I wrote). Swap it for your
-actual Obsidian vault — **after** step 1.
+### 2. Run the extraction gate before trusting memory
 
-### 5. Try voice — nothing blocks this
+```powershell
+yoyo eval --only extraction     # ~1 min, three cases, needs the tailnet
+```
+
+Memory's only model call is the extractor, and its failures are the ones that compound: a
+wrong claim written today is a retrievable source tomorrow and indistinguishable from
+something you actually said by next week. The gate checks every quote verbatim against the
+source and checks that a conversation with no facts in it produces **zero** claims.
+
+It has never been run live. If `coder` fails the abstain case, that is a finding worth having
+before any real conversation goes through `yoyo remember`, not after.
+
+### 3. Then actually use memory, and read what it proposes
+
+**Re-run this after the 2026-08-15 fix — it is the open item.** The first real dry run
+produced six pages of world history quoted from Yoyo's own replies (§1). Extraction now
+reads only your turns. Whether that leaves anything *worth keeping* is unverified.
+
+```powershell
+yoyo remember                          # conversations become searchable, verbatim
+yoyo memory build --dry-run            # see the claims before anything is written
+yoyo memory build
+yoyo memory show                       # what it decided you care about
+```
+
+**The open question is whether the extraction is any good**, and nothing but running it
+answers that. Watch for: claims that are facts about a *conversation* rather than about an
+entity, subjects that should have been merged, and anything that reads like an inference.
+A high volume of trivial pages is a failure even though every quote verifies.
+
+### 4. Ingest real material
+
+The corpus is **3 documents**. Nothing about retrieval quality, chunk size or the context
+budget has met reality, and every latency number in §6.12 was measured against a corpus small
+enough to be atypical. This is the cheapest way to find out what is actually wrong.
+
+### 5. Write some linked notes
+
+The vault map has one note to draw. It is the surface the whole second brain is meant to show
+up in, and it cannot demonstrate anything until there are notes with wikilinks between them.
+
+### 6. Install voice and run it
 
 ```powershell
 uv pip install -e ".[voice]"
-yoyo voice status                      # what works
+yoyo voice status                      # what actually works
 yoyo say "Yoyo can speak"              # Windows SAPI, no download
-yoyo transcribe some-recording.m4a     # downloads the model on first run
-yoyo talk                              # push-to-talk conversation
+yoyo transcribe some-recording.m4a     # downloads the whisper model on first run
+yoyo talk                              # push-to-talk, routed per turn, spoken answers
 ```
 
-The only real decision is the whisper model size — compare `base`, `small` and `medium` on
-your own audio and pick by how well it handles proper nouns, not by the realtime factor.
+Two decisions only running it can settle: **whisper model size** (judge on proper nouns, not
+on speed — `small` turns "Qdrant" into "quadrant") and whether the spoken answer shape is
+right. The shaping is unit-tested and has never been heard.
+
+### 7. Microsoft 365 mail and calendar — if you still want them
+
+Gmail is live. The Entra registration was never done: App registrations → New →
+Authentication → *Allow public client flows: Yes* → Graph → Delegated → `Mail.Read`,
+`Mail.ReadWrite`, `Calendars.Read`. **Never `Mail.Send`.** Then `yoyo mail auth work`.
+
+Also still pending on Google: `yoyo calendar auth personal` — the config is enabled and the
+adapter is tested, but consent was never granted, so calendar has answered nothing real.
+
+### 8. Re-test the graph in its intended case
+
+ADR-026 is settled for two local sources. The graph has still never been measured on the case
+it was built for: **mail and vault and corpus in one question.** Now that Gmail is live this
+is finally runnable, and it is the test that decides whether decomposition earns its keep
+generally or only on the question shape it was tuned against.
 
 ### Smaller items, any time
 
-- **`docs/model-baseline-gb10.md`** — verify the numbers against a fresh `ollama list`;
-  `gemma4`, `nemotron-3.5-lightning` and `qwen3.6:27b` were slated for removal, unconfirmed.
-  The file also predates `coder`.
-- **`think: false`** on `fast`, server-side — build `qwen3.6-nothink`, register it as a
-  separate capability, and compare. `fast` currently pays thinking overhead on every turn.
-- **Answer OQ7** (local vs server embeddings) while the corpus is still small — either way
-  costs a full reindex.
-- **Re-run the ADR-026 comparison a few more times.** Every round so far is a single trial
-  per config. The gaps were large enough to act on and too small a sample to call closed.
-- **Round 4 spent 3 tool calls after both parts were answerable** — possibly the new
-  untried-source hint over-encouraging exploration. Only worth chasing if agent latency
-  starts to matter.
-- **Calendar MCP**, same adapter shape as mail.
-- **Test `/ask/stream`** — written, never exercised.
-- **Raise `OLLAMA_MAX_LOADED_MODELS` to 3** so `agent`, `fast` and `coder` can be resident
-  together; currently a role switch can cost a cold load.
+- **`docs/model-baseline-gb10.md`** — staleness banner added and the model list **confirmed
+  against `ollama list` on 2026-08-15**: three models, 92 GB of 121 GB usable. Still needs
+  `yoyo bench --role supervisor --concurrency 1,4` to fold `coder`'s numbers in
+  properly — run it *after* `OLLAMA_MAX_LOADED_MODELS=3`, or a cold load pollutes round one.
+  (`supervisor` is the role; `coder` is the capability behind it. `coder_supervisor` was the
+  pre-promotion candidate name and no longer exists.)
+- **`think: false` on `fast`**, server-side — build `qwen3.6-nothink`, register it as its own
+  capability, compare. `fast` pays thinking overhead on every turn today.
+- **Answer OQ7** (local vs server embeddings) while the corpus is small — either way costs a
+  full reindex, and step 4 above makes that more expensive every day.
+- **Re-run the ADR-026 comparison** a few more times. Every round is a single trial.
+- **Watch the router for clamping.** If `yoyo route` keeps showing "(raised from ask…)", the
+  classifier and the rules disagree, and one of them is wrong.
+- **Raise `OLLAMA_MAX_LOADED_MODELS` to 3** so `agent`, `fast` and `coder` are resident
+  together; a role switch can currently cost a cold load.
+- **Memory consolidation** is deliberately not built. Ten conversations about one trip stay
+  ten sets of claims. Revisit when memory is large enough for retrieval to degrade — building
+  it before there is anything to consolidate would be guessing at the shape.
 
 ---
 
@@ -435,9 +502,33 @@ else could:
 - **The fabricated-citation warning**, surfaced in the page rather than swallowed — a turn
   that needed the scrubber is a turn whose model invented a source.
 
+- **The Health tab** — doctor, eval and bench as buttons, with **history**. Runs are rows in
+  SQLite, so a case that flips between eval runs is visible, and every bench row carries the
+  host state it was taken on. Long work runs as a **job**: start it, close the tab, come
+  back, and the log replays from where it got to.
+
 One self-contained HTML file served from the package. No build step, no npm, **no CDN** — a
 UI that fetched a framework from unpkg would break on the first offline day and quietly
 contradict the point of the project. A test asserts it loads nothing remote.
+
+**Testing it.** The UI had no test at all until 2026-08-15, and it showed: a 500 left a
+blank panel and a traceback in a console nobody was reading. `tests/ui/` now drives the real
+page in a real browser — every view renders, a job runs end to end, an approval leaves the
+queue, a bad request raises a visible toast, and any console error fails the run. It is not
+collected by pytest (it needs a browser and a server); run it by hand after touching the UI:
+
+```powershell
+python tests/ui/fixture_server.py     # throwaway vault + queue on :8099
+python tests/ui/smoke.py              # screenshots to /tmp/uitest/shots
+```
+
+**The UI can now start work, so it needs a lock.** Every state-changing route requires an
+`x-yoyo-token` header plus a same-origin `Origin`; reads stay open. This is not about other
+people using your laptop — it is that any page you visit can `fetch()` a POST at
+`127.0.0.1` and, before this, would have been obeyed. The token is generated on first
+`yoyo serve` into `data/ui-token` and injected into the page, so there is nothing to
+configure and no unauthenticated route handing it out. A script that needs it can read the
+file.
 
 ### 6.4 Tools and MCP
 
@@ -474,7 +565,7 @@ you optimise; both produce a verdict you act on.
 
 | Command | What it does |
 |---|---|
-| `yoyo eval` | Runs the golden set — 10 cases, 6 hard gates: **tool fidelity** (a probe tool holds an unguessable secret; the model must call it and report the value, fabricating instead is a hard fail), **tool retry** (the probe fails once — giving up after one error fails), **grounded** (the answer must cite a real chunk id and must contain no fabricated file path), **abstain** (the corpus cannot answer it; inventing an answer fails), and **extraction** (memory's only model call: every claim's quote is verified verbatim against the source, and a source with no durable facts must produce zero claims). `--only <case-or-kind>` to run one — `--only extraction` gates memory alone. Budget ~5 min for the full set. |
+| `yoyo eval` | Runs the golden set — 11 cases, 7 hard gates: **tool fidelity** (a probe tool holds an unguessable secret; the model must call it and report the value, fabricating instead is a hard fail), **tool retry** (the probe fails once — giving up after one error fails), **grounded** (the answer must cite a real chunk id and must contain no fabricated file path), **abstain** (the corpus cannot answer it; inventing an answer fails), and **extraction** (memory's only model call: every claim's quote is verified verbatim against the source, and a source with no durable facts must produce zero claims). `--only <case-or-kind>` to run one — `--only extraction` gates memory alone. Budget ~5 min for the full set. |
 | `yoyo eval --role <role>` | Same gates against a different role — **this is how a candidate model gets promoted**. A model that has not passed all four gates does not get pinned to a tool-using role, regardless of how fast it is. |
 | `yoyo bench --role <role>` | Measures single-stream speed and concurrency scaling for the capability behind a role. `--concurrency 1,4` sets the levels, `--repeats N` averages rounds. Reports aggregate tok/s, per-stream tok/s, scaling factor, and 429s **counted separately** so a per-key rate limit is never mistaken for the model serialising. Prints `NO MEASUREMENT` rather than a number when every request failed. |
 
@@ -487,8 +578,16 @@ in memory defeats the point of having the gate.
 
 **Why bench exists:** concurrency is **empirical** (ADR-022). Two architectural hypotheses
 were tested and both falsified — being MoE predicts nothing, and a sibling model's scaling
-predicts nothing. `agent` scales 3.76x at concurrency 4; `fast` and `coder` both serialise
-(~1.1x) despite all three being MoE. Measure every new model.
+predicts nothing. `agent` scales 3.76x at concurrency 4 and `fast` serialises (1.13x) despite
+both being MoE.
+
+**And a scaling number is only valid for the host state it was taken on.** `coder` was
+recorded at 1.09x from a single trial, then re-measured at **3.75x** over three repeats once
+`OLLAMA_MAX_LOADED_MODELS=3` and `OLLAMA_KEEP_ALIVE=30m` were set on the box — four requests
+in the wall clock of one, no 429s. The likely mechanism is eviction (92 GB of weights against
+121 GB usable, five-minute default keep-alive), which from the client is indistinguishable
+from serialisation. Unproven. What is certain is that the first number was wrong, and that
+`--repeats 1` is how you get a number like it.
 
 ### 6.6 Mail
 
@@ -554,7 +653,12 @@ like a network fault.
 | Command | What it does |
 |---|---|
 | `yoyo remember` | **Phase 1.** Past conversations become searchable, verbatim. Interprets nothing. |
-| `yoyo memory build` | **Phase 2–4.** Writes entity pages into `yoyo-memory/` from conversations and your notes. |
+| `yoyo memory propose` | **Extract and queue for review.** Writes nothing. This is the normal path. |
+| `yoyo memory review` | The claims waiting on you, each with the quote it rests on. |
+| `yoyo memory decide <id>` | Approve one, or `--reject` it. **Rejection is permanent** — a rejected claim is never re-proposed, because a queue that re-asks becomes a treadmill and a treadmill gets rubber-stamped. |
+| `yoyo memory apply` | Write the approved claims. **The only path from a proposal to a page.** Refuses on an unencrypted disk (`--force` for throwaway content). |
+| `yoyo memory build` | The old one-shot path: extract, verify and write in one step. Kept for throwaway testing; prefer propose → review → apply. |
+| `yoyo memory build --dry-run` | **Everything except writing.** Extracts, verifies every quote, reconciles against what is on disk, and prints each proposed claim next to the quote it rests on. No page, no index, no log line. This is how you answer *"is the extraction any good"* without putting pages about your family in your vault to find out — and it is exempt from the encryption gate, because blocking the one command that lets you inspect memory would push you toward running the real thing instead. |
 | `yoyo memory show [subject]` | List memory pages, or read one with its sources and quotes. |
 | `yoyo memory forget <subject>` | Really deletes. `--containing` for specific claims. |
 
@@ -751,7 +855,15 @@ Breaking these is a bug, not a style choice.
 16. **Nothing private goes into a web query.** Enforced by prompt and tool description, not
     by code — which is why the egress log exists to check it.
 17. **Fetch never reaches a private address.** Checked after DNS resolution. Not adjustable.
-18. **This file is checked against the code.** `tests/test_readme_matches_code.py` fails when
+18. **Loopback is not a security boundary.** Every state-changing route requires the
+    `x-yoyo-token` header and a same-origin `Origin`. The threat is not another machine — it
+    is any page you visit, which can POST to `127.0.0.1` from your own browser. A cross-origin
+    page cannot set a custom header without a preflight this server never answers, which is
+    what actually closes it.
+19. **The UI cannot run anything destructive.** Jobs come from an explicit registry, not a
+    name lookup, and `restore`, `reindex --recreate` and `memory forget` are deliberately
+    absent from it. A real `memory build` is absent too until the per-claim review exists.
+20. **This file is checked against the code.** `tests/test_readme_matches_code.py` fails when
     the role table, command list, config list, or test counts drift. §13's "if it disagrees
     with the code, the file is the bug" is a test, not an aspiration.
 
@@ -760,24 +872,24 @@ Breaking these is a bug, not a style choice.
 ## 10. Tests
 
 ```powershell
-pytest -q          # 718 passing
+pytest -q          # 791 passing
 ruff check src tests
 ```
 
 | Area | Tests | Covers |
 |---|---|---|
-| Doctor / CLI | 76 | every one of the 36 commands renders its help; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
+| Doctor / CLI | 91 | every command renders its help; **an unencrypted disk fails doctor, and `remember` / `memory build` refuse to run on one**; an unreadable BitLocker status says how to get a real answer instead of shrugging; tool-fidelity message no longer says only `agent`; **unset vs misconfigured vault are different verdicts**; doctor makes no network call |
 | Tasks | 50 | every checkbox flavour, four due-date dialects, completion-date-is-not-a-due-date, drafts excluded, **structural proof nothing can tick a box** |
 | Eval harness | 47 | fidelity gate catches a fabricating model, retry gate fails give-up-after-one-error, abstention both directions, `--role` override reaches every runner, **memory extraction gated on verbatim quotes and on abstaining from a source with no facts** |
 | Calendar | 39 | ISO offsets incl. Graph's 7-digit fractions, local day bounds, conflict maths (back-to-back is not a clash), declined/cancelled exclusion, **structural proof of no write path and read-only scopes** |
 | Voice | 36 | timestamp formatting, speakable-text stripping, config validation, PowerShell quoting, **structural proof no voice module imports a network client** |
 | Agent / tools | 50 | arg validation, errors surfaced not raised, iteration + wall-clock budgets, forced answer on exhaustion, duplicate short-circuit, **untried-source hint**, **fabricated-path stripping** |
 | MCP client | 36 | config, schema translation, result unwrapping, SDK field-name drift, failure diagnostics, live stdio round trip |
-| Vault | 28 | path confinement both directions, symlink escape, frontmatter, backlinks, drafts-only writes, drafts excluded from canon |
+| Vault | 34 | **memory pages are on the map and invisible to search** — Yoyo cannot cite its own writing; path confinement both directions, symlink escape, frontmatter, backlinks, drafts-only writes, drafts excluded from canon |
 | Web search | 42 | SSRF gate incl. DNS-resolves-to-loopback, non-http schemes refused, **untrusted-content framing kept not stripped**, egress log survives corruption, the SearXNG 403 explains itself |
 | Mail | 41 | config, account resolution, Gmail/Graph parsing, HTML→text, MIME round trip, **structural proof no send path exists** |
 | Structured output | 17 | schema coercion, retry on invalid JSON, the single-egress-point rule |
-| README guard | 16 | **this file vs the code** — role table, capability names, command list, config files, ADR references, test counts |
+| README guard | 18 | **this file vs the code** — role table, capability names, command list, **flags and `--role` values shown in examples**, config files, ADR references, test counts |
 | MCP servers (live) | 15 | corpus, tasks and calendar spawned over stdio; arguments really arrive; startup diagnostics say what is wrong |
 | Graph | 15 | plan/dispatch/synthesise, subtask cap never silently truncates, worker gets the full question, planner splits on source difference not cost |
 | Bench | 13 | distinct prompts, `NO MEASUREMENT` when every request fails, 429s not read as serialisation |
@@ -787,10 +899,11 @@ ruff check src tests
 | Storage | 8 | migrations, hash skip, chunk rebuild, FTS, ordering |
 | Chunking | 8 | boundaries, coverage, ordinals, size bounds |
 | Citations | 17 | scrubber keeps real identifiers, replaces invented paths visibly, gate and scrubber share one regex |
-| Memory (wiki) | 33 | **the laundering path is closed** — no claim may cite a wiki page; verbatim quotes; contradictions flagged not resolved; owner prose untouched |
+| Memory (wiki + review queue) | 55 | **a rejected claim is never re-proposed** and only approved claims reach a page; the approval rate is the metric; **the assistant's half of a transcript is not evidence** — a claim quoting Yoyo cannot survive verification; **a dry run writes nothing — no page, no index, no log line**; **the laundering path is closed** — no claim may cite a wiki page; verbatim quotes; contradictions flagged not resolved; owner prose untouched |
 | Memory (raw sources) | 15 | verbatim transcripts, speaker labels, trivial turns skipped, **structural proof the raw layer never calls a model** |
 | Intent router | 22 | **uncertainty escalates, never downgrades** — the classifier cannot route below the deterministic floor; overrides call no model; a dead classifier degrades to rules, not to an exception |
 | Spoken answers (speech) | 13 | citations counted not recited, code announced not spelled out, truncation says so, **structural proof shaping only deletes and never invents words** |
+| Jobs + UI auth | 28 | **`/memory/apply` is the only route that writes a page** and there is no approve-everything route; **a POST without the token is refused** and reads stay open; a foreign Origin is rejected even with a token; a failing job is a status not a crash; a reattaching client replays what it missed; **no job kind is destructive** and memory-build from the UI is dry-run only |
 | Retrieval | 6 | RRF ranking, context budget, citations |
 
 **Not covered — assume broken until exercised:** every mail and calendar **network** path
@@ -810,7 +923,8 @@ verification is `yoyo doctor`, `yoyo eval` and `yoyo bench`, and those need the 
 | **4** | **Encryption at rest.** BitLocker off. Corpus, SQLite, LiteLLM key, mail **and calendar** refresh tokens, and any **audio or transcript** all plaintext. Each component added since has widened this. Deferred by owner; **test data only** while it stands. | a real corpus, real mail, real recordings |
 | 5 | **Egress auditing.** ADR-009's Squid boundary doesn't exist on Windows. **Partially addressed:** web search and fetch now log to `data/egress.jsonl` (ADR-029). Everything else — the model endpoint, OAuth refreshes, fastembed downloads — is still unaudited, and nothing is *blocked*. | nothing, but must not be implicitly answered |
 | 7 | **Embeddings local or server.** Costs a reindex either way — cheapest to decide now. | — |
-| 8 | **Golden eval set** covers current pins only. Reopened and closed for `coder` (7/7, ADR-027); reopen again for any new pin. | future pins |
+| 8 | **Golden eval set** covers current pins only. Reopened and closed for `coder` (7/7, ADR-027); reopen again for any new pin. Three **extraction** cases added 2026-08-15 and **not yet run live**. | future pins |
+| **10** | **Is the extraction any good?** **First real answer, 2026-08-15: no — and the gates could not see it.** Six pages of world history, 8/8 accepted, every quote verifying. Cause was the input, not the gates: claims quoted Yoyo's own replies. Fixed (owner-turns-only evidence, plus a "general knowledge is never a memory" rule) and **the fix is unverified against a real run.** Re-open until a dry run over real conversations produces something worth keeping. | trusting memory; deciding whether consolidation is needed |
 | 9 | **Whisper model size.** `small` is a config default, not a measured answer. Needs a comparison on real audio, judged on proper nouns. | trusting a transcript |
 | 1 | Email provider protocol | *closed by the mail build — Gmail + Graph* |
 | 2 | Corpus size and formats | Docling sizing |
@@ -834,7 +948,7 @@ verification is `yoyo doctor`, `yoyo eval` and `yoyo bench`, and those need the 
 | ADR-030 | Intent routing that can only over-serve; spoken answers get their own shape |
 
 Authoritative log: the Claude project docs `yoyo-architecture-decisions-2026-08-14.md` and
-`yoyo-open-questions-ledger.md`. **`docs/adr/` now mirrors all eight** so a clone explains
+`yoyo-open-questions-ledger.md`. **`docs/adr/` now mirrors every one of them** so a clone explains
 itself — the project doc still wins on conflict, and the mirror is dated.
 
 **Void from the original plan:** `plan-gb10.md` §1–§4, Phase-0 T2/T3/T4/T-tenancy,
@@ -864,7 +978,7 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-14 | Mail MCP: Gmail + Microsoft 365, read and draft, no send path. 168 tests. |
 | 2026-08-14 | Mail MCP: Gmail + Microsoft 365, read and draft, no send path. 168 tests. |
 | 2026-08-15 | Git remote set up (`tethik01/yoyo-client`). LangGraph supervisor graph built; PydanticAI rejected. |
-| 2026-08-15 | **qwen3-coder-next promoted** (ADR-027): 7/7 gates, 50 tok/s vs `agent`'s 11.7. Serialises (1.09x) — no fan-out benefit, but nearly all use is single-stream. `reasoning` must never be set on a coder role (Ollama 500). |
+| 2026-08-15 | **qwen3-coder-next promoted** (ADR-027): 7/7 gates, 50 tok/s vs `agent`'s 11.7. Recorded as serialising (1.09x) — **later corrected to 3.75x**, see below. `reasoning` must never be set on a coder role (Ollama 500). |
 | 2026-08-15 | Fabricated citation path observed live twice on `coder`. Fixed in four prompts, a mechanical eval gate, and `citations.py` — the interactive path strips and warns, the gate still fails. |
 | 2026-08-15 | **ADR-026 reversed.** On `coder`, `yoyo agent` answered a two-part question in 8.3 s and got it **wrong** — tunnelled into the vault, never called `search_corpus`. `yoyo plan` got it right in 23.6 s. |
 | 2026-08-15 | Source-tunnelling fixed: untried-source hint at 2 calls, plus a prompt rule that "not in the notes" ≠ "not there". Patched agent now answers both parts correctly — in 30.1 s, still losing to the graph's 23.6 s. **ADR-026 confirmed on round 4.** |
@@ -907,5 +1021,15 @@ the real thing"** and stays 🟡 until someone runs it.
 | 2026-08-15 | **Memory Phase 1** — `yoyo remember` makes past conversations searchable as verbatim corpus documents, speaker-labelled and timestamped. Deliberately dumb: a structural test asserts the raw-source layer never calls a model, because everything the wiki layer writes later must quote text no model generated. Also `ingest_text()`, so non-file sources reuse the whole existing chunk/embed/cite pipeline rather than growing a second retrieval path. |
 | 2026-08-15 | **Memory Phases 2–4.** Wiki layer with two mechanical gates — verbatim quote, and no claim may cite another wiki page. Extraction is the single place memory calls a model, and the source is set by the caller so a model can never name its own evidence. Identity ambiguity is asked, never guessed. Contradictions are recorded as edges, not resolved. `SCHEMA.md` regenerated into the vault so the rules are readable where the memory lives. |
 | 2026-08-15 | **Memory Phase 5 — routing and spoken answers.** `yoyo do` / `yoyo talk --mode auto` pick the mode. The design constraint: the mode choice was doing safety work, so routing may only over-serve. A deterministic pass computes a floor and the classifier is clamped to it — it can escalate, never downgrade — and a classifier that is down degrades to the rules rather than failing the turn. Every choice is printed with its reason, `--mode` overrides, and the UI offers one-click redo in another mode. Speech gets its own shape (`voice/speech.py`), regex-only so it can delete but never invent. |
+| 2026-08-15 | **The dry run earned its keep on the first use.** Six pages of world history, every gate green — see §1. Memory now extracts from **the owner's turns only**: `build.evidence_from()` strips the assistant's half of a transcript before extraction, and verification runs against that same text, so a claim quoting Yoyo cannot pass. The eval runner applies the identical split, because a gate that tests a path production does not take is how this got through in the first place. Extraction's prompt gained the rule the shape of the failure taught: *if a fact would be equally true for a stranger, it says nothing about its owner.* |
+| 2026-08-15 | **`yoyo memory build --dry-run`.** Extracts, verifies, reconciles and prints every proposed claim next to its quote — writing no page, no index and above all no log line, since the append-only log's only value is being an accurate record. It exists because the open question about memory is not "does it work" but "is what it extracts worth keeping", and that cannot be answered by a count. Caught by the same review: the README had been telling the owner to run `--dry-run` for two days before the flag existed, so the README guard now checks **flags**, not just command names. |
+| 2026-08-15 | **The encryption gate was not gating.** On the owner's machine the BitLocker probe returns `Get-CimInstance : Access denied` — reading volume status is a privileged API, so an ordinary PowerShell gets UNKNOWN every time, and UNKNOWN was treated as "carry on". The refusal branch had never once fired on the machine it was written for. No cleverer probe exists; the honest fix is to say so, so doctor's detail now names elevation as the way to get a real answer and `remember` / `memory build` print "could not confirm this disk is encrypted" before proceeding. Silence and a clean bill of health must not look the same. |
+| 2026-08-15 | **The UI failed silently, and now cannot.** Clicking "Run doctor" returned a 500 — `no such table: jobs`, because `yoyo migrate` had not been run — and the page showed *nothing*. Three fixes, in order of how much they matter: the API **applies pending migrations at startup** (a schema the code needs is not a decision to delegate to someone who is trying to do something else); every unhandled error returns JSON with a message instead of an HTML 500; and the UI raises a **toast** for every failure. Then the redesign: sidebar navigation, stat tiles, per-view empty states that distinguish "nothing here" from "could not load", light and dark, and a **browser smoke test** — the UI was the only part of this project with no test, which is exactly why this one got through. |
+| 2026-08-15 | **The review queue, and the hole it closed on the way.** `vault.py` excluded `yoyo-drafts/` from search but not `yoyo-memory/` — so while extraction had always refused to *read* a wiki page as a source, `vault_search` could still find one and hand it to the model as "your notes". The same circularity through the other door, and worse: at write time a bad quote fails a check, at read time the quote is genuinely there and nothing mechanical could catch it. Memory pages are now invisible to search and still visible on the map, because drawing a node is not citing it. Then the queue itself: extract → propose → you decide → apply, with `/memory/apply` the single write path, rejection permanent (a re-asking queue is a treadmill, and a treadmill gets rubber-stamped), and the **approval rate** surfaced as the metric that says whether review is working at all. |
+| 2026-08-15 | **The UI can run things now** — a job runner (`jobs.py`, `/jobs*`) plus a Health tab. Doctor, eval, bench, ingest, remember, dry-run memory build and backup are jobs: rows in SQLite that survive a reload, replay their log to a reattaching client, and record the *arguments* next to the result. That last part is the direct lesson of the 1.09x → 3.75x reversal — a bench row now carries the host state it was taken on, because a measurement without its inputs is an anecdote. Eval history is per-case across runs, so a gate that flips is visible rather than a thing you notice three days later. |
+| 2026-08-15 | **A write boundary before the first write route** (`auth.py`). Loopback stops other machines, not other origins: any page you visit can POST to `127.0.0.1`, and it needed to stop being able to the moment a POST could ingest files. Token header + Origin check, token injected into the page rather than served from a route. Jobs come from an explicit registry — `restore`, `reindex --recreate` and `memory forget` are not in it, and will not be. |
+| 2026-08-15 | **`coder` does not serialise after all — 1.09x was wrong.** Re-measured over three repeats after `OLLAMA_MAX_LOADED_MODELS=3` and `OLLAMA_KEEP_ALIVE=30m`: **3.75x @ 4**, 14.8 → 55.5 aggregate tok/s, four requests in the wall clock of one, zero 429s. The consequence drawn from the old figure — "the graph loses its fan-out benefit" — is withdrawn; `plan` fan-out pays on the default pins. Cause unestablished: 92 GB of weights against 121 GB usable with a five-minute keep-alive means eviction and serialisation look identical from the client. The original was a single trial. **ADR-022 extended: concurrency is empirical per model *and per host configuration*, and a scaling number without the box state it was taken on is not a measurement.** |
+| 2026-08-15 | **A role named in §4 never existed.** The doc told the owner to bench `coder_supervisor` — the candidate's label before ADR-027 promoted it; the registry has only `supervisor`. The command exits 2 for anyone following the doc. The README guard now checks `--role` values against `yoyo-models.yaml` — the third rung of the same ladder after command names and flags. |
+| 2026-08-15 | **OQ4 given teeth.** `yoyo doctor` gained an `encryption at rest` check that reads BitLocker's volume status for C: and **fails** when it is not encrypted, and `yoyo remember` / `yoyo memory build` refuse to run on an unencrypted disk (exit 3, `--force` for throwaway content). Reads status only — enabling encryption is a system security change and stays the owner's. Unknown status *passes*: a check that cannot run is not evidence of absence, which is the one mistake this project keeps finding new variants of. |
 | 2026-08-15 | **Memory extraction gated** (`yoyo eval --only extraction`). Three cases against the real verifier: quotes must verify verbatim, a source with no durable facts must yield zero claims, and an inference trap ("Sarah called about the review") where the only honest answer is nothing. Recall is deliberately the softest of the three — a model that extracts everything scores perfectly on recall and is unusable. |
 | 2026-08-15 | Caught while building: my first contradiction design struck through the older claim, which needed a string heuristic to decide two claims were "the same fact" — and one crude enough to catch *lives in Toronto/Lisbon* also catches *is my sister/is moving in March*, silently striking a true fact. Replaced with flagging, per the pattern's own rule. Also: `SCHEMA.md` was being read back as an entity called "schema"; a page must now declare `about:` to count as one. |

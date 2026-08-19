@@ -4,211 +4,583 @@
 
   One self-contained file, served by api.py. No build step, no npm, no CDN: the whole point
   of this project is that it runs on hardware the owner controls, and a UI that phones out
-  to unpkg for a framework would quietly break that on the first offline day.
+  to unpkg for a framework would quietly break that on the first offline day. A test asserts
+  it loads nothing remote.
 
-  What this shows that the CLI cannot: tool calls as they arrive, citations you can click to
-  resolve, and a warning when the fabricated-citation scrubber had to act. Everything else
-  is a nicer place to type a question.
+  Four views, and each earns its place by showing something the terminal cannot:
+
+    Chat    — tool calls as they arrive, citations you can click, the router's choice with
+              one-click override, and a warning when the fabricated-citation scrubber acted.
+    Memory  — the review queue. Claims next to the quote they rest on, because "is this
+              worth keeping" is not answerable from a count.
+    Map     — the vault as a graph, with Yoyo's own pages marked so they never read as yours.
+    Health  — doctor, eval and bench as jobs with HISTORY. A gate that flips between runs is
+              invisible in a screenshot and obvious in a column.
+
+  Design rules, learned the hard way this week:
+    * Never fail silently. A 500 used to leave a blank panel and a traceback in a console
+      the owner was not reading. Every failure now raises a toast.
+    * Say what is happening. Buttons that start minutes of work say so, and show progress.
+    * Distinguish absence from failure. "No jobs yet" and "could not load jobs" are
+      different sentences — the same distinction this project keeps relearning.
 -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Yoyo</title>
+<!-- Inline so the browser never requests /favicon.ico — which 404'd on every page load and
+     put a red line in the console that looked, at a glance, like a real failure. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236ea8ff'/%3E%3Ctext x='16' y='23' font-family='system-ui' font-size='19' font-weight='700' fill='white' text-anchor='middle'%3EY%3C/text%3E%3C/svg%3E">
 <style>
+  /* Dark by default — this runs beside a terminal — with a light mode that is a real design
+     rather than an inversion. */
   :root {
-    --bg: #12131a; --panel: #191b24; --line: #272a37; --ink: #e6e8ef;
-    --dim: #8b90a3; --accent: #7aa2f7; --ok: #9ece6a; --warn: #e0af68; --bad: #f7768e;
-    --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    --bg:#0f1117; --panel:#171922; --panel-2:#1d202b; --line:#2a2e3d; --line-soft:#22252f;
+    --ink:#e8eaf2; --ink-2:#b9bfd0; --dim:#7b8296;
+    --accent:#6ea8ff; --accent-soft:rgba(110,168,255,.12); --violet:#a78bfa;
+    --ok:#4ade80; --warn:#fbbf24; --bad:#f87171;
+    --mono:"Cascadia Code",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --r:10px; --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.5);
   }
   @media (prefers-color-scheme: light) {
-    :root { --bg:#f7f8fa; --panel:#fff; --line:#e2e5ec; --ink:#1a1c23; --dim:#666c7e;
-            --accent:#2f6fd0; --ok:#3f8f3f; --warn:#9a6b00; --bad:#c33; }
+    :root {
+      --bg:#f6f7f9; --panel:#fff; --panel-2:#f2f4f8; --line:#dfe3ea; --line-soft:#eaedf2;
+      --ink:#151822; --ink-2:#3f465a; --dim:#6b7382;
+      --accent:#2563eb; --accent-soft:rgba(37,99,235,.09); --violet:#7c3aed;
+      --ok:#15803d; --warn:#b45309; --bad:#b91c1c;
+      --shadow:0 1px 2px rgba(16,24,40,.05), 0 8px 24px -16px rgba(16,24,40,.25);
+    }
   }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 system-ui, sans-serif; }
-  header { display:flex; align-items:center; gap:12px; padding:10px 18px;
-           border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
-  header h1 { font-size:16px; margin:0; letter-spacing:.02em; }
-  header .sub { color:var(--dim); font-size:12px; }
-  #health { margin-left:auto; font-size:12px; color:var(--dim); }
-  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--dim); margin-right:5px; }
+
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.55 var(--sans);
+         -webkit-font-smoothing:antialiased; }
+  a { color:var(--accent); }
+  ::selection { background:var(--accent-soft); }
+
+  /* ---------------------------------------------------------------- shell --- */
+  .app { display:grid; grid-template-columns:248px 1fr; height:100vh; }
+
+  nav { background:var(--panel); border-right:1px solid var(--line);
+        display:flex; flex-direction:column; min-height:0; }
+  .brand { display:flex; align-items:center; gap:9px; padding:16px 16px 12px; font-weight:700;
+           letter-spacing:-.01em; font-size:16px; }
+  .brand .logo { width:26px; height:26px; border-radius:7px; flex:none;
+                 background:linear-gradient(135deg,var(--accent),var(--violet));
+                 display:grid; place-items:center; color:#fff; font-size:13px; font-weight:800; }
+  .brand small { color:var(--dim); font-weight:500; font-size:11px; }
+
+  .navlinks { padding:4px 8px 8px; display:flex; flex-direction:column; gap:2px; }
+  .navlink { display:flex; align-items:center; gap:9px; width:100%; text-align:left;
+             padding:8px 10px; border-radius:8px; border:1px solid transparent;
+             background:none; color:var(--ink-2); font:inherit; font-size:14px; cursor:pointer; }
+  .navlink:hover { background:var(--panel-2); color:var(--ink); }
+  .navlink.on { background:var(--accent-soft); color:var(--ink); border-color:var(--line);
+                font-weight:600; }
+  .navlink .ico { width:18px; text-align:center; opacity:.85; }
+  .navlink .badge { margin-left:auto; font-size:11px; padding:1px 7px; border-radius:999px;
+                    background:var(--accent); color:#fff; font-weight:700; }
+
+  .side-h { padding:14px 16px 6px; font-size:11px; text-transform:uppercase;
+            letter-spacing:.08em; color:var(--dim); font-weight:700;
+            display:flex; align-items:center; justify-content:space-between; }
+  #convs { overflow-y:auto; flex:1; padding:0 8px 8px; min-height:0; }
+  .conv { display:flex; gap:8px; align-items:baseline; padding:7px 10px; border-radius:8px;
+          cursor:pointer; color:var(--ink-2); font-size:13.5px; }
+  .conv:hover { background:var(--panel-2); color:var(--ink); }
+  .conv.active { background:var(--accent-soft); color:var(--ink); }
+  .conv .label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .conv .when { color:var(--dim); font-size:11px; flex:none; }
+
+  .side-foot { border-top:1px solid var(--line); padding:10px 14px; font-size:12px;
+               color:var(--dim); display:flex; align-items:center; gap:7px;
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+               cursor:default; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); flex:none; }
   .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
-  .shell { display:grid; grid-template-columns:240px 1fr; gap:0; min-height:calc(100vh - 44px); }
-  aside { border-right:1px solid var(--line); background:var(--panel); padding:12px 10px;
-          position:sticky; top:44px; height:calc(100vh - 44px); overflow:auto; }
-  aside h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
-             margin:6px 6px 8px; }
-  .conv { padding:8px 10px; border-radius:7px; cursor:pointer; font-size:13px;
-          color:var(--ink); display:flex; gap:6px; align-items:baseline; }
-  .conv:hover { background:color-mix(in srgb, var(--accent) 12%, transparent); }
-  .conv.active { background:color-mix(in srgb, var(--accent) 20%, transparent); font-weight:600; }
-  .conv .when { margin-left:auto; font-size:11px; color:var(--dim); flex:none; }
-  .conv .label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .newconv { width:100%; margin-bottom:10px; background:transparent; color:var(--accent);
-             border:1px dashed var(--line); font-weight:600; }
-  @media (max-width: 720px) { .shell { grid-template-columns:1fr; } aside { display:none; } }
-  main { max-width:900px; margin:0 auto; padding:18px; width:100%; }
-  .turn { border:1px solid var(--line); border-radius:10px; background:var(--panel);
-          margin-bottom:16px; overflow:hidden; }
-  .q { padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
-  .q .mode { font-weight:400; font-size:11px; color:var(--dim); text-transform:uppercase;
-             letter-spacing:.08em; margin-left:8px; }
-  .route { padding:8px 16px; border-bottom:1px solid var(--line); font-size:12.5px;
-           color:var(--dim); }
-  .route b { color:var(--accent); font-weight:600; text-transform:uppercase;
-             letter-spacing:.06em; }
-  .route .redo { margin-left:10px; }
-  .route .redo button { font-size:11px; padding:2px 7px; margin-left:4px; }
-  .tools { padding:8px 16px; border-bottom:1px solid var(--line); font-family:var(--mono); font-size:12.5px; }
+
+  /* ----------------------------------------------------------------- main --- */
+  main { min-width:0; display:flex; flex-direction:column; height:100vh; }
+  header.page { padding:18px 28px 14px; border-bottom:1px solid var(--line-soft);
+                display:flex; align-items:flex-start; gap:16px; }
+  header.page h1 { margin:0; font-size:19px; letter-spacing:-.01em; }
+  header.page p { margin:3px 0 0; color:var(--dim); font-size:13px; max-width:70ch; }
+  .view { flex:1; overflow-y:auto; padding:20px 28px 28px; min-height:0; }
+  .view[hidden] { display:none; }
+
+  /* --------------------------------------------------------------- pieces --- */
+  button { padding:7px 13px; border-radius:8px; border:1px solid var(--line);
+           background:var(--panel); color:var(--ink); font:inherit; font-size:13.5px;
+           cursor:pointer; transition:background .12s, border-color .12s; }
+  button:hover:not(:disabled) { border-color:var(--accent); background:var(--panel-2); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff;
+                   font-weight:600; }
+  button.primary:hover:not(:disabled) { filter:brightness(1.08); background:var(--accent); }
+  button.ghost { border-color:transparent; color:var(--ink-2); }
+  button.tiny { padding:3px 9px; font-size:12px; }
+  button.danger:hover:not(:disabled) { border-color:var(--bad); color:var(--bad); }
+  button.good:hover:not(:disabled) { border-color:var(--ok); color:var(--ok); }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+
+  input, select { padding:7px 10px; border-radius:8px; border:1px solid var(--line);
+                  background:var(--bg); color:var(--ink); font:inherit; font-size:13.5px; }
+  input:focus, select:focus { border-color:var(--accent); outline:none; }
+  label.field { display:flex; flex-direction:column; gap:4px; font-size:11px;
+                color:var(--dim); font-weight:700; text-transform:uppercase;
+                letter-spacing:.05em; }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+          padding:16px 18px; margin-bottom:16px; box-shadow:var(--shadow); }
+  .card h2 { margin:0 0 2px; font-size:15px; letter-spacing:-.01em; }
+  .card .why { margin:0 0 12px; color:var(--dim); font-size:12.5px; max-width:82ch; }
+  .card .why b { color:var(--ink-2); }
+  .row { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; }
+
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px;
+           margin-bottom:16px; }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+          padding:12px 14px; }
+  .tile .k { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim);
+             font-weight:700; }
+  .tile .v { font-size:22px; font-weight:700; letter-spacing:-.02em; margin-top:2px; }
+  .tile .sub { font-size:11.5px; color:var(--dim); }
+
+  table.grid { width:100%; border-collapse:collapse; font-size:13px; margin-top:12px; }
+  table.grid th, table.grid td { text-align:left; padding:7px 10px;
+                                 border-bottom:1px solid var(--line-soft); vertical-align:top; }
+  table.grid th { color:var(--dim); font-weight:700; font-size:11px; text-transform:uppercase;
+                  letter-spacing:.05em; }
+  table.grid tr:last-child td { border-bottom:none; }
+  .ok-t { color:var(--ok); font-weight:600; }
+  .bad-t { color:var(--bad); font-weight:600; }
+  .muted { color:var(--dim); }
+  .empty { color:var(--dim); font-size:13px; padding:14px 2px; }
+
+  pre.log { background:var(--bg); border:1px solid var(--line); border-radius:8px;
+            padding:12px; max-height:340px; overflow:auto; font-family:var(--mono);
+            font-size:12px; white-space:pre-wrap; margin:12px 0 0; }
+
+  /* ------------------------------------------------------------ chat turns --- */
+  #chatEmpty .hero { max-width:620px; margin:6vh auto 0; text-align:center; }
+  #chatEmpty h2 { margin:0 0 6px; font-size:22px; letter-spacing:-.02em; }
+  #chatEmpty p { margin:0 auto 18px; color:var(--dim); font-size:13.5px; max-width:52ch; }
+  #chatEmpty .examples { display:flex; flex-direction:column; gap:8px; align-items:stretch; }
+  #chatEmpty .example { text-align:left; color:var(--ink-2); font-size:13.5px; padding:10px 13px; }
+  #chatEmpty .example:hover { color:var(--ink); }
+
+  .turn { border:1px solid var(--line); border-radius:var(--r); background:var(--panel);
+          margin-bottom:16px; overflow:hidden; box-shadow:var(--shadow); }
+  .q { padding:13px 17px; border-bottom:1px solid var(--line-soft); font-weight:600;
+       display:flex; gap:10px; align-items:baseline; }
+  .q .mode { font-weight:700; font-size:10.5px; color:var(--accent);
+             background:var(--accent-soft); padding:2px 8px; border-radius:999px;
+             text-transform:uppercase; letter-spacing:.06em; flex:none; }
+  .route { padding:9px 17px; border-bottom:1px solid var(--line-soft); font-size:12.5px;
+           color:var(--dim); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .route b { color:var(--accent); text-transform:uppercase; letter-spacing:.05em;
+             font-size:11px; }
+  .route .redo { margin-left:auto; display:flex; gap:4px; align-items:center; }
+  .tools { padding:10px 17px; border-bottom:1px solid var(--line-soft);
+           font-family:var(--mono); font-size:12px; background:var(--panel-2); }
   .tool { color:var(--dim); padding:2px 0; }
   .tool b { color:var(--accent); font-weight:600; }
   .tool.err b { color:var(--bad); }
-  .a { padding:14px 16px; white-space:pre-wrap; word-wrap:break-word; }
-  .meta { padding:8px 16px; border-top:1px solid var(--line); color:var(--dim);
+  .a { padding:15px 17px; white-space:pre-wrap; word-wrap:break-word; }
+  .meta { padding:9px 17px; border-top:1px solid var(--line-soft); color:var(--dim);
           font-size:12px; font-family:var(--mono); }
-  .warn { padding:10px 16px; background:color-mix(in srgb, var(--warn) 14%, transparent);
-          border-top:1px solid var(--line); color:var(--warn); font-size:13px; }
-  cite { font-style:normal; color:var(--accent); cursor:pointer; border-bottom:1px dotted var(--accent); }
-  cite:hover { background:color-mix(in srgb, var(--accent) 15%, transparent); }
-  form { display:flex; gap:8px; position:sticky; bottom:0; background:var(--bg);
-         padding:14px 0 20px; }
-  input[type=text] { flex:1; padding:11px 14px; border-radius:8px; border:1px solid var(--line);
-                     background:var(--panel); color:var(--ink); font:inherit; }
-  select, button { padding:11px 14px; border-radius:8px; border:1px solid var(--line);
-                   background:var(--panel); color:var(--ink); font:inherit; cursor:pointer; }
-  button { background:var(--accent); color:#fff; border-color:transparent; font-weight:600; }
-  button:disabled { opacity:.5; cursor:default; }
-  dialog { border:1px solid var(--line); border-radius:10px; background:var(--panel);
-           color:var(--ink); max-width:760px; width:92vw; padding:0; }
+  .warn-bar { margin:0 17px 12px; padding:9px 12px; border-radius:8px; font-size:12.5px;
+              background:rgba(248,113,113,.1); border:1px solid var(--bad); color:var(--bad); }
+  cite { font-style:normal; color:var(--accent); background:var(--accent-soft);
+         border-radius:5px; padding:0 4px; cursor:pointer; }
+  cite:hover { text-decoration:underline; }
+
+  form#ask[hidden] { display:none; }   /* `hidden` loses to an explicit display value */
+  form#ask { display:flex; gap:8px; padding:14px 28px 18px; border-top:1px solid var(--line);
+             background:var(--panel); }
+  form#ask input { flex:1; padding:11px 14px; font-size:14.5px; }
+
+  /* --------------------------------------------------------------- memory --- */
+  .subject { border:1px solid var(--line); border-radius:var(--r); margin-bottom:12px;
+             overflow:hidden; }
+  .subject > header { display:flex; gap:10px; align-items:center; padding:10px 14px;
+                      background:var(--panel-2); border-bottom:1px solid var(--line-soft); }
+  .subject .kind { font-size:10.5px; text-transform:uppercase; letter-spacing:.06em;
+                   color:var(--dim); font-weight:700; }
+  .subject .acts { margin-left:auto; display:flex; gap:6px; }
+  .claim { padding:11px 14px; border-bottom:1px solid var(--line-soft); }
+  .claim:last-child { border-bottom:none; }
+  .claim .txt { margin-bottom:5px; }
+  .claim .ev { font-family:var(--mono); font-size:11.5px; color:var(--dim);
+               border-left:2px solid var(--line); padding-left:9px; margin-bottom:7px; }
+  .claim .acts { display:flex; gap:6px; }
+
+  /* ------------------------------------------------------------------ map --- */
+  #mapWrap { border:1px solid var(--line); border-radius:var(--r); background:var(--panel);
+             overflow:hidden; }
+  #map { width:100%; height:520px; display:block; }
+  .legend { display:flex; gap:16px; flex-wrap:wrap; padding:10px 16px; font-size:12px;
+            color:var(--dim); border-top:1px solid var(--line-soft); }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:50%;
+              margin-right:5px; vertical-align:middle; }
+
+  /* --------------------------------------------------------------- toasts --- */
+  /* Every failure lands here. The 500 that started this redesign printed a traceback into a
+     console nobody was watching and left the panel blank. */
+  #toasts { position:fixed; right:18px; bottom:18px; display:flex; flex-direction:column;
+            gap:8px; z-index:50; max-width:min(440px, 90vw); }
+  .toast { background:var(--panel); border:1px solid var(--line);
+           border-left:3px solid var(--accent); border-radius:9px; padding:11px 13px;
+           box-shadow:var(--shadow); font-size:13px; display:flex; gap:10px;
+           align-items:flex-start; animation:slide .18s ease-out; }
+  .toast.bad { border-left-color:var(--bad); }
+  .toast.good { border-left-color:var(--ok); }
+  .toast.warn { border-left-color:var(--warn); }
+  .toast .msg { flex:1; word-break:break-word; }
+  .toast .msg b { display:block; margin-bottom:2px; }
+  @keyframes slide { from { opacity:0; transform:translateY(6px); } }
+
+  dialog { border:1px solid var(--line); border-radius:var(--r); background:var(--panel);
+           color:var(--ink); max-width:820px; width:92vw; padding:0; box-shadow:var(--shadow); }
   dialog::backdrop { background:rgba(0,0,0,.55); }
-  dialog h3 { margin:0; padding:12px 16px; border-bottom:1px solid var(--line); font-size:14px; }
-  dialog .body { padding:14px 16px; max-height:60vh; overflow:auto; white-space:pre-wrap;
-                 font-family:var(--mono); font-size:12.5px; }
-  dialog footer { padding:10px 16px; border-top:1px solid var(--line); text-align:right; }
-  .hint { color:var(--dim); font-size:13px; padding:6px 2px 14px; }
-  .tabs { display:flex; gap:4px; margin-bottom:12px; }
-  .tab { padding:6px 12px; border-radius:7px; border:1px solid var(--line); background:var(--panel);
-         color:var(--dim); cursor:pointer; font-size:13px; }
-  .tab.on { color:var(--ink); border-color:var(--accent); font-weight:600; }
-  #mapWrap { border:1px solid var(--line); border-radius:10px; background:var(--panel); }
-  #mapStats { padding:10px 14px; border-bottom:1px solid var(--line); font-size:12.5px;
-              color:var(--dim); font-family:var(--mono); }
-  #map { width:100%; height:min(66vh, 560px); display:block; cursor:grab; }
-  .legend { padding:10px 14px; border-top:1px solid var(--line); font-size:12px; color:var(--dim);
-            display:flex; gap:16px; flex-wrap:wrap; }
-  .legend i { width:9px; height:9px; border-radius:50%; display:inline-block; margin-right:5px; }
+  dialog h3 { margin:0; padding:14px 18px; border-bottom:1px solid var(--line);
+              font-size:14px; font-family:var(--mono); }
+  dialog .body { padding:16px 18px; max-height:60vh; overflow:auto; white-space:pre-wrap;
+                 font-size:13.5px; }
+  dialog footer { padding:12px 18px; border-top:1px solid var(--line); text-align:right; }
+
+  .spin { display:inline-block; width:11px; height:11px; border-radius:50%; flex:none;
+          border:2px solid var(--line); border-top-color:var(--accent);
+          animation:spin .7s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  @media (max-width:820px) {
+    .app { grid-template-columns:1fr; }
+    nav { display:none; }
+    .view, header.page, form#ask { padding-left:16px; padding-right:16px; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <h1>Yoyo</h1>
-  <span class="sub">local assistant · inference on MyAIServer</span>
-  <span id="health"><span class="dot"></span>checking…</span>
-</header>
 
-<div class="shell">
-<aside>
-  <button class="newconv" id="new">+ New conversation</button>
-  <h2>History</h2>
+<div class="app">
+<nav>
+  <div class="brand">
+    <span class="logo">Y</span>
+    <span>Yoyo<br><small>local · your hardware</small></span>
+  </div>
+
+  <div class="navlinks">
+    <button class="navlink on" data-view="chat"><span class="ico">◇</span>Chat</button>
+    <button class="navlink" data-view="memory"><span class="ico">◈</span>Memory
+      <span class="badge" id="memBadge" hidden>0</span></button>
+    <button class="navlink" data-view="map"><span class="ico">⬡</span>Vault map</button>
+    <button class="navlink" data-view="health"><span class="ico">◉</span>Health</button>
+  </div>
+
+  <div class="side-h">Conversations <button class="tiny ghost" id="new">+ New</button></div>
   <div id="convs"></div>
-</aside>
+
+  <div class="side-foot" id="health"><span class="dot"></span>checking…</div>
+</nav>
 
 <main>
-  <div class="hint">
-    Answers cite their sources. <b>Click any citation to read the original</b> — a citation
-    you cannot follow is decoration.
-  </div>
-  <div class="tabs">
-    <button class="tab on" data-view="chat">Chat</button>
-    <button class="tab" data-view="map">Vault map</button>
+  <header class="page">
+    <div>
+      <h1 id="viewTitle">Chat</h1>
+      <p id="viewSub">Answers cite their sources. Click any citation to read the original.</p>
+    </div>
+  </header>
+
+  <!-- ------------------------------------------------------------- chat --- -->
+  <div class="view" id="view-chat">
+    <div id="turns"></div>
+    <div id="chatEmpty">
+      <div class="hero">
+        <h2>Ask anything.</h2>
+        <p><b>auto</b> picks the mode and tells you which it chose — and you can override it
+          on any answer. Every claim comes with a citation you can click.</p>
+        <div class="examples">
+          <button class="example">What do my documents say about the GB10?</button>
+          <button class="example">Any unread mail from this week I should know about?</button>
+          <button class="example">What's on my calendar tomorrow, and does my mail conflict?</button>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <div id="turns"></div>
+  <!-- ----------------------------------------------------------- memory --- -->
+  <div class="view" id="view-memory" hidden>
+    <div class="tiles" id="memTiles"></div>
+    <div class="card">
+      <h2>Review queue</h2>
+      <p class="why">The gates prove a claim is <b>traceable</b> — quoted verbatim from
+        something you said. Only you can say whether it is <b>worth keeping</b>: the first
+        real run produced six pages of world history with every gate green.
+        <b>Nothing is written until you approve it.</b></p>
+      <div class="row">
+        <button class="primary" data-job='{"kind":"memory-propose"}'>Look for new memories</button>
+        <button id="applyMemory">Write approved pages</button>
+      </div>
+      <div id="proposals"></div>
+    </div>
+  </div>
 
-  <div id="mapWrap" hidden>
-    <div id="mapStats">loading…</div>
-    <svg id="map"></svg>
-    <div class="legend">
-      <span><i style="background:var(--accent)"></i>note, in corpus</span>
-      <span><i style="background:var(--dim)"></i>note, not ingested</span>
-      <span><i style="background:var(--warn)"></i>empty</span>
-      <span><i style="background:transparent;border:1px dashed var(--bad)"></i>linked but missing</span>
+  <!-- -------------------------------------------------------------- map --- -->
+  <div class="view" id="view-map" hidden>
+    <div class="tiles" id="mapTiles"></div>
+    <div id="mapWrap">
+      <svg id="map"></svg>
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i>your note, in corpus</span>
+        <span><i style="background:var(--dim)"></i>your note, not ingested</span>
+        <span><i style="background:var(--violet)"></i>Yoyo's memory page</span>
+        <span><i style="background:var(--warn)"></i>empty</span>
+        <span><i style="background:transparent;border:1px dashed var(--bad)"></i>linked but not written</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ----------------------------------------------------------- health --- -->
+  <div class="view" id="view-health" hidden>
+    <div class="tiles" id="healthTiles"></div>
+
+    <div class="card">
+      <h2>Doctor</h2>
+      <p class="why">Every seam: tailnet, roles, tool fidelity, embeddings, SQLite, Qdrant,
+        vault, encryption at rest.</p>
+      <div class="row">
+        <button class="primary" data-job='{"kind":"doctor"}'>Run doctor</button>
+        <span class="muted" id="doctorWhen"></span>
+      </div>
+      <div id="doctorTable"></div>
+    </div>
+
+    <div class="card">
+      <h2>Eval — the gates</h2>
+      <p class="why">Gates, not a score: a model that fails one does not get the role.
+        <b>Runs are kept</b>, so a case that flips between runs shows up as a column rather
+        than as a surprise three days later.</p>
+      <div class="row">
+        <label class="field">Scope
+          <select id="evalOnly">
+            <option value="">every case · ~5 min</option>
+            <option value="extraction">extraction · ~1 min</option>
+            <option value="tool_fidelity">tool fidelity</option>
+            <option value="grounded">grounded</option>
+            <option value="abstain">abstain</option>
+          </select>
+        </label>
+        <label class="field">Role override
+          <input id="evalRole" placeholder="(default)" size="16">
+        </label>
+        <button class="primary" id="runEval">Run eval</button>
+      </div>
+      <div id="evalHistory"></div>
+    </div>
+
+    <div class="card">
+      <h2>Bench — concurrency</h2>
+      <p class="why"><b>A scaling number is only valid for the host state it was taken on.</b>
+        <code>coder</code> read 1.09× once and 3.75× after the box's keep-alive changed. Note
+        what is different about the box, or the next reversal is another three-day surprise.</p>
+      <div class="row">
+        <label class="field">Role <input id="benchRole" value="supervisor" size="12"></label>
+        <label class="field">Concurrency <input id="benchConc" value="1,4" size="6"></label>
+        <label class="field">Repeats <input id="benchRepeats" value="3" size="3"></label>
+        <label class="field" style="flex:1;min-width:220px">Host state
+          <input id="benchNote" placeholder="e.g. KEEP_ALIVE=30m, 3 model slots">
+        </label>
+        <button class="primary" id="runBench">Run bench</button>
+      </div>
+      <div id="benchHistory"></div>
+    </div>
+
+    <div class="card">
+      <h2>Jobs</h2>
+      <p class="why">Long work survives a reload — close the tab, come back, the log replays.</p>
+      <div id="jobList"></div>
+      <pre class="log" id="jobLog" hidden></pre>
     </div>
   </div>
 
   <form id="ask">
-    <input type="text" id="q" placeholder="Ask something…" autocomplete="off" autofocus>
-    <select id="mode" title="auto: Yoyo picks and tells you · ask: one retrieval · agent: tools · plan: parallel workers">
+    <input type="text" id="q" placeholder="Ask anything…" autocomplete="off" autofocus>
+    <select id="mode" title="auto: Yoyo picks and says which · ask: one retrieval, no tools · agent: tool loop · plan: parallel workers">
       <option value="auto">auto</option>
       <option value="agent">agent</option>
       <option value="ask">ask</option>
       <option value="plan">plan</option>
     </select>
-    <button type="submit" id="go">Send</button>
+    <button type="submit" class="primary" id="go">Send</button>
   </form>
 </main>
 </div>
 
-<dialog id="src"><h3 id="srcTitle"></h3><div class="body" id="srcBody"></div>
-  <footer><button onclick="document.getElementById('src').close()">Close</button></footer></dialog>
+<div id="toasts"></div>
+
+<dialog id="src">
+  <h3 id="srcTitle"></h3>
+  <div class="body" id="srcBody"></div>
+  <footer><button onclick="document.getElementById('src').close()">Close</button></footer>
+</dialog>
 
 <script>
 const $ = (id) => document.getElementById(id);
-// The whole point of this feature: without it, a refresh lost everything and a follow-up
-// question ("and what about tomorrow?") reached the model with no idea what "tomorrow"
-// referred to. The SQLite tables existed from day one; the UI simply never passed an id.
-let conversationId = null;
 const esc = (s) => (s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
-// Citations come in three vocabularies — [12] corpus chunks, [mail:<id>] messages,
-// [Note.md] vault notes. One pattern, because the user should not have to know which is
-// which to click it.
-// The negative lookahead matters: `[Label](url)` is a markdown link, not a citation, and
-// turning its label into a clickable chip sent the user to a 404 resolver. Seen live on an
-// answer whose links the model had invented outright.
-const CITE = /\[((?:mail:)?[A-Za-z0-9][^\]\s][^\]]{0,120})\](?!\()/g;
+// Injected by the server into this page. NOT fetched from a route: a route that hands out
+// the token has to be unauthenticated to be useful, and then it is one more thing to reason
+// about. The page that can read this HTML is the page that has it — the same-origin rule the
+// browser already enforces, reused rather than reinvented.
+//
+// Why any of this exists: loopback is not a security boundary. Any page you visit can POST
+// to 127.0.0.1. It cannot set this header cross-origin without a preflight the server never
+// answers, which is what actually closes the hole.
+const TOKEN = "__YOYO_TOKEN__";
 
-function linkify(text) {
-  return esc(text).replace(CITE, (m, id) =>
-    `<cite data-id="${esc(id)}" title="Click to read the source">[${esc(id)}]</cite>`);
+// ------------------------------------------------------------------ toasts ---
+// The bug that prompted this redesign: clicking "Run doctor" against an unmigrated database
+// returned a 500, printed a traceback into a console nobody was watching, and changed
+// nothing on screen. Silence is the one thing a UI must never do with a failure.
+function toast(message, kind = "bad", title = null) {
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.innerHTML = `<div class="msg">${title ? `<b>${esc(title)}</b>` : ""}${esc(message)}</div>`;
+  const close = document.createElement("button");
+  close.className = "tiny ghost";
+  close.textContent = "✕";
+  close.onclick = () => el.remove();
+  el.append(close);
+  $("toasts").append(el);
+  if (kind !== "bad") setTimeout(() => el.remove(), 5000);
+  return el;
 }
 
+async function api(path, options = {}) {
+  const res = await fetch(path, options);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error((body && (body.detail || body.message)) || `${res.status} ${res.statusText}`);
+  }
+  return body;
+}
+
+const post = (path, body) => api(path, {
+  method: "POST",
+  headers: {"content-type": "application/json", "x-yoyo-token": TOKEN},
+  body: JSON.stringify(body || {}),
+});
+
+function when(iso) {
+  if (!iso) return "";
+  const then = new Date(String(iso).replace(" ", "T") + (String(iso).endsWith("Z") ? "" : "Z"));
+  const mins = Math.round((Date.now() - then.getTime()) / 60000);
+  if (!isFinite(mins)) return "";
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  return `${Math.round(mins / 1440)}d ago`;
+}
+
+const tile = (k, v, sub, cls = "") =>
+  `<div class="tile"><div class="k">${esc(k)}</div>
+   <div class="v ${cls}">${esc(String(v))}</div>
+   <div class="sub">${esc(sub || "")}</div></div>`;
+
+// -------------------------------------------------------------- navigation ---
+const VIEWS = {
+  chat:   {title: "Chat",
+           sub: "Answers cite their sources. Click any citation to read the original."},
+  memory: {title: "Memory",
+           sub: "Claims Yoyo proposes, next to the quote each one rests on. You decide."},
+  map:    {title: "Vault map",
+           sub: "Your notes and their links. Yoyo's own pages are shown here, and marked."},
+  health: {title: "Health",
+           sub: "Doctor, gates and measurements — with the history that makes a change visible."},
+};
+
+let view = "chat";
+
+function show(next) {
+  view = next;
+  document.querySelectorAll(".navlink").forEach(b => b.classList.toggle("on", b.dataset.view === next));
+  for (const name of Object.keys(VIEWS)) $(`view-${name}`).hidden = name !== next;
+  $("viewTitle").textContent = VIEWS[next].title;
+  $("viewSub").textContent = VIEWS[next].sub;
+  $("ask").hidden = next !== "chat";
+  if (next === "map") loadMap();
+  if (next === "health") refreshJobs();
+  if (next === "memory") loadProposals();
+}
+document.querySelectorAll(".navlink").forEach(b => b.onclick = () => show(b.dataset.view));
+
+// An empty chat with a blinking cursor tells you nothing about what this can do. The
+// examples are the three shapes the router actually distinguishes — one source, a live
+// lookup, and a multi-source question.
+document.querySelectorAll(".example").forEach(b => b.onclick = () => {
+  $("q").value = b.textContent.trim();
+  $("q").focus();
+});
+
+// ------------------------------------------------------------------ health ---
 async function health() {
   try {
-    const r = await fetch("/health");
-    const j = await r.json();
+    const j = await api("/health");
     const bad = (j.checks || []).filter(c => !c.ok);
     // Tool count is shown because its absence caused a real confusion: `web_search` was
-    // configured and enabled, the API had simply never mounted it, and the only clue was
-    // an error message inside the model's answer.
+    // configured and enabled, the API had simply never mounted it, and the only clue was an
+    // error message inside the model's answer.
     const tools = (j.tools || []).length;
     const failedMcp = Object.entries(j.mcp || {}).filter(([, ok]) => !ok).map(([n]) => n);
-    const bits = [`${tools} tools`];
-    if (failedMcp.length) bits.push(`mcp failed: ${failedMcp.join(", ")}`);
+    const trouble = bad.length || failedMcp.length;
     $("health").title = (j.tools || []).join(", ");
-    $("health").innerHTML = (bad.length || failedMcp.length)
-      ? `<span class="dot bad"></span>${bits.join(" · ")}${bad.length ? " · " + esc(bad.map(c=>c.name).join(", ")) : ""}`
-      : `<span class="dot ok"></span>${bits.join(" · ")} · all checks pass`;
-  } catch {
+    $("health").innerHTML =
+      `<span class="dot ${trouble ? "bad" : "ok"}"></span>` +
+      esc(trouble
+        ? [`${tools} tools`,
+           failedMcp.length ? `mcp: ${failedMcp.join(", ")}` : null,
+           bad.length ? `${bad.length} check(s) failing` : null].filter(Boolean).join(" · ")
+        : `${tools} tools · all checks pass`);
+
+    const checks = j.checks || [];
+    $("healthTiles").innerHTML =
+      tile("Checks", `${checks.length - bad.length}/${checks.length}`,
+           bad.length ? bad.map(c => c.name).join(", ") : "all passing",
+           bad.length ? "bad-t" : "ok-t") +
+      tile("Tools reachable", tools, (j.tools || []).slice(0, 3).join(", ")) +
+      tile("MCP servers",
+           `${Object.values(j.mcp || {}).filter(Boolean).length}/${Object.keys(j.mcp || {}).length}`,
+           failedMcp.join(", ") || "all mounted", failedMcp.length ? "bad-t" : "");
+  } catch (err) {
     $("health").innerHTML = `<span class="dot bad"></span>API unreachable`;
+    $("healthTiles").innerHTML = tile("API", "unreachable", String(err.message || err), "bad-t");
   }
 }
 
-document.addEventListener("click", async (e) => {
-  const cite = e.target.closest("cite");
-  if (!cite) return;
-  const id = cite.dataset.id;
+// --------------------------------------------------------------- citations ---
+// Three vocabularies — [12] corpus chunks, [mail:<id>] messages, [Note.md] vault notes. One
+// pattern, because you should not have to know which is which to click it.
+// The negative lookahead matters: `[Label](url)` is a markdown link, not a citation, and
+// turning its label into a chip sent the user to a 404 resolver. Seen live on an answer
+// whose links the model had invented outright.
+const CITE = /\[((?:mail:)?[A-Za-z0-9][^\]\s][^\]]{0,120})\](?!\()/g;
+const linkify = (text) => esc(text).replace(CITE, (m, id) =>
+  `<cite data-id="${esc(id)}" title="Click to read the source">[${esc(id)}]</cite>`);
+
+async function openSource(id) {
   $("srcTitle").textContent = id;
   $("srcBody").textContent = "loading…";
   $("src").showModal();
   try {
-    const r = await fetch(`/citation/${encodeURIComponent(id)}`);
-    const j = await r.json();
-    if (!r.ok) { $("srcBody").textContent = j.detail || "not found"; return; }
+    const j = await api(`/citation/${encodeURIComponent(id)}`);
     if (j.kind === "mail") {
       $("srcTitle").textContent = j.subject || id;
-      $("srcBody").textContent = `from ${j.from}\nto   ${(j.to||[]).join(", ")}\n${j.date}\n\n${j.body || j.snippet || ""}`;
+      $("srcBody").textContent =
+        `from ${j.from}\nto   ${(j.to || []).join(", ")}\n${j.date}\n\n${j.body || j.snippet || ""}`;
     } else if (j.kind === "chunk") {
       $("srcTitle").textContent = `${j.title || "chunk"} — ${j.source_path}`;
       $("srcBody").textContent = j.text;
@@ -217,48 +589,65 @@ document.addEventListener("click", async (e) => {
       $("srcBody").textContent = j.text || "";
     }
   } catch (err) {
-    $("srcBody").textContent = String(err);
+    $("srcBody").textContent = String(err.message || err);
   }
+}
+
+document.addEventListener("click", (e) => {
+  const cite = e.target.closest("cite");
+  if (cite) openSource(cite.dataset.id);
 });
+
+// -------------------------------------------------------------------- chat ---
+// Without a conversation id, a refresh lost everything and a follow-up ("and what about
+// tomorrow?") reached the model with no idea what "tomorrow" meant. The SQLite tables
+// existed from day one; the UI simply never passed an id.
+let conversationId = null;
 
 $("ask").addEventListener("submit", async (e) => {
   e.preventDefault();
   const question = $("q").value.trim();
   if (!question) return;
   const mode = $("mode").value;
-  $("q").value = ""; $("go").disabled = true;
+  $("q").value = "";
+  $("go").disabled = true;
+  $("chatEmpty").hidden = true;
 
   const turn = document.createElement("div");
   turn.className = "turn";
-  turn.innerHTML = `<div class="q">${esc(question)}<span class="mode">${mode}</span></div>
+  turn.innerHTML = `<div class="q"><span>${esc(question)}</span><span class="mode">${esc(mode)}</span></div>
                     <div class="route" hidden></div>
                     <div class="tools" hidden></div>
-                    <div class="a"><span style="color:var(--dim)">thinking…</span></div>
+                    <div class="a"><span class="muted"><span class="spin"></span> thinking…</span></div>
                     <div class="meta" hidden></div>`;
   $("turns").append(turn);
-  turn.scrollIntoView({behavior:"smooth", block:"end"});
+  turn.scrollIntoView({behavior: "smooth", block: "end"});
 
   const routeBox = turn.querySelector(".route");
   const tools = turn.querySelector(".tools");
   const answer = turn.querySelector(".a");
   const meta = turn.querySelector(".meta");
 
-  // Hand-rolled SSE parse rather than EventSource: EventSource cannot POST, and the
-  // question does not belong in a URL — putting private text in a query string is the
-  // habit this project spends its time avoiding.
+  // Hand-rolled SSE parse rather than EventSource: EventSource cannot POST, and the question
+  // does not belong in a URL — putting private text in a query string is the habit this
+  // project spends its time avoiding.
   try {
     const res = await fetch("/agent/stream", {
       method: "POST",
-      headers: {"content-type": "application/json"},
+      headers: {"content-type": "application/json", "x-yoyo-token": TOKEN},
       body: JSON.stringify({question, mode, conversation_id: conversationId}),
     });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `${res.status} ${res.statusText}`);
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     while (true) {
       const {done, value} = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, {stream:true});
+      buffer += decoder.decode(value, {stream: true});
       const chunks = buffer.split("\n\n");
       buffer = chunks.pop();
       for (const raw of chunks) {
@@ -273,30 +662,28 @@ $("ask").addEventListener("submit", async (e) => {
           if (d.conversation_id) conversationId = d.conversation_id;
         } else if (ev === "route") {
           // Visible automation. The router chose; say what it chose, why, and offer the
-          // three one-click overrides — a routing decision you cannot see is one you
-          // cannot correct, and `ask` answering a mail question looks exactly like a
-          // confident correct answer.
+          // one-click overrides — a routing decision you cannot see is one you cannot
+          // correct, and `ask` answering a mail question looks exactly like a confident
+          // correct answer.
           routeBox.hidden = false;
-          routeBox.innerHTML = `<b>${esc(d.mode)}</b> — ${esc(d.reason || "")}`
-            + `<span class="redo">redo as` + ["ask","agent","plan"]
-                .filter((m) => m !== d.mode)
-                .map((m) => `<button type="button" data-redo="${m}">${m}</button>`).join("")
-            + `</span>`;
-          routeBox.querySelectorAll("button[data-redo]").forEach((b) => {
-            b.addEventListener("click", () => {
-              $("q").value = d.question || question;
-              $("mode").value = b.dataset.redo;
-              $("ask").requestSubmit();
-            });
+          routeBox.innerHTML =
+            `<b>${esc(d.mode)}</b><span>${esc(d.reason || "")}</span>` +
+            `<span class="redo"><span class="muted">redo as</span>` +
+            ["ask", "agent", "plan"].filter(m => m !== d.mode)
+              .map(m => `<button type="button" class="tiny" data-redo="${m}">${m}</button>`).join("") +
+            `</span>`;
+          routeBox.querySelectorAll("button[data-redo]").forEach(b => b.onclick = () => {
+            $("q").value = d.question || question;
+            $("mode").value = b.dataset.redo;
+            $("ask").requestSubmit();
           });
         } else if (ev === "tool" || ev === "subtask") {
           tools.hidden = false;
           const row = document.createElement("div");
           row.className = "tool" + (d.ok === false ? " err" : "");
-          const args = d.arguments && Object.keys(d.arguments).length
-            ? JSON.stringify(d.arguments) : "";
+          const args = d.arguments && Object.keys(d.arguments).length ? JSON.stringify(d.arguments) : "";
           row.innerHTML = ev === "subtask"
-            ? `<b>${d.id}.</b> ${esc(d.goal)}`
+            ? `<b>${esc(String(d.id))}.</b> ${esc(d.goal)}`
             : `<b>${esc(d.name)}</b> ${esc(args)}${d.error ? " — " + esc(d.error) : ""}`;
           tools.append(row);
         } else if (ev === "source") {
@@ -309,52 +696,49 @@ $("ask").addEventListener("submit", async (e) => {
           answer.innerHTML = linkify(d.text || "(no answer)");
           meta.hidden = false;
           meta.textContent = [
-            d.model, d.latency_ms != null ? `${(d.latency_ms/1000).toFixed(1)}s` : null,
+            d.model, d.latency_ms != null ? `${(d.latency_ms / 1000).toFixed(1)}s` : null,
             d.iterations != null ? `${d.iterations} iterations` : null, d.stopped_because,
           ].filter(Boolean).join(" · ");
           if (d.fabricated_links && d.fabricated_links.length) {
             // Never swallowed. A turn that needed the scrubber is a turn whose model
-            // invented a citation, and the owner should know which ones did.
+            // invented a citation, and you should know which ones did.
             const w = document.createElement("div");
-            w.className = "warn";
+            w.className = "warn-bar";
             w.textContent = `Removed ${d.fabricated_links.length} fabricated citation path(s): `
                           + d.fabricated_links.join(", ");
             turn.insertBefore(w, meta);
           }
         } else if (ev === "error") {
-          answer.innerHTML = `<span style="color:var(--bad)">${esc(d.message)}</span>`;
+          answer.innerHTML = `<span class="bad-t">${esc(d.message)}</span>`;
+          toast(d.message, "bad", "The turn failed");
         }
       }
     }
   } catch (err) {
-    answer.innerHTML = `<span style="color:var(--bad)">${esc(String(err))}</span>`;
+    const msg = String(err.message || err);
+    answer.innerHTML = `<span class="bad-t">${esc(msg)}</span>`;
+    toast(msg, "bad", "Could not answer");
   } finally {
     $("go").disabled = false;
     $("q").focus();
     loadConversations();
-    turn.scrollIntoView({behavior:"smooth", block:"end"});
+    turn.scrollIntoView({behavior: "smooth", block: "end"});
   }
 });
 
-function when(iso) {
-  if (!iso) return "";
-  const then = new Date(iso.replace(" ", "T") + (iso.endsWith("Z") ? "" : "Z"));
-  const mins = Math.round((Date.now() - then.getTime()) / 60000);
-  if (mins < 1) return "now";
-  if (mins < 60) return `${mins}m`;
-  if (mins < 1440) return `${Math.round(mins/60)}h`;
-  return `${Math.round(mins/1440)}d`;
-}
-
 async function loadConversations() {
   try {
-    const list = await (await fetch("/conversations")).json();
+    const list = await api("/conversations");
     $("convs").innerHTML = "";
+    if (!list.length) {
+      $("convs").innerHTML = `<div class="empty" style="padding:8px 10px">No conversations yet.</div>`;
+      return;
+    }
     for (const c of list) {
       const row = document.createElement("div");
       row.className = "conv" + (c.id === conversationId ? " active" : "");
       row.innerHTML = `<span class="label">${esc(c.title || "(untitled)")}</span>`
-                    + `<span class="when">${when(c.updated_at)}</span>`;
+                    + `<span class="when">${esc(when(c.updated_at))}</span>`;
       row.onclick = () => openConversation(c.id);
       $("convs").append(row);
     }
@@ -364,9 +748,11 @@ async function loadConversations() {
 function renderTurn({question, mode, answer, meta, tools}) {
   const turn = document.createElement("div");
   turn.className = "turn";
-  turn.innerHTML = `<div class="q">${esc(question)}<span class="mode">${esc(mode||"")}</span></div>
+  turn.innerHTML = `<div class="q"><span>${esc(question)}</span>${
+                      mode ? `<span class="mode">${esc(mode)}</span>` : ""}</div>
                     <div class="tools" ${tools && tools.length ? "" : "hidden"}></div>
-                    <div class="a">${answer === undefined ? '<span style="color:var(--dim)">thinking…</span>' : linkify(answer)}</div>
+                    <div class="a">${answer === undefined
+                        ? '<span class="muted">thinking…</span>' : linkify(answer)}</div>
                     <div class="meta" ${meta ? "" : "hidden"}>${esc(meta || "")}</div>`;
   for (const t of tools || []) {
     const row = document.createElement("div");
@@ -381,8 +767,10 @@ function renderTurn({question, mode, answer, meta, tools}) {
 async function openConversation(id) {
   conversationId = id;
   $("turns").innerHTML = "";
+  $("chatEmpty").hidden = true;
+  show("chat");
   try {
-    const data = await (await fetch(`/conversations/${id}`)).json();
+    const data = await api(`/conversations/${id}`);
     // Messages arrive oldest-first and alternate user/assistant. Pairing them here rather
     // than storing turns keeps the schema as it is — one row per message, which is what
     // history replay to the model needs.
@@ -396,12 +784,14 @@ async function openConversation(id) {
         mode: md.mode || "",
         answer: reply ? reply.content : "(no answer recorded)",
         tools: md.tools || [],
-        meta: reply ? [reply.model, reply.latency_ms ? `${(reply.latency_ms/1000).toFixed(1)}s` : null]
-                        .filter(Boolean).join(" · ") : "",
+        meta: reply
+          ? [reply.model, reply.latency_ms ? `${(reply.latency_ms / 1000).toFixed(1)}s` : null]
+              .filter(Boolean).join(" · ")
+          : "",
       });
     }
   } catch (err) {
-    $("turns").innerHTML = `<div class="hint">could not load conversation: ${esc(String(err))}</div>`;
+    toast(String(err.message || err), "bad", "Could not load that conversation");
   }
   loadConversations();
   $("q").focus();
@@ -410,54 +800,62 @@ async function openConversation(id) {
 $("new").onclick = () => {
   conversationId = null;
   $("turns").innerHTML = "";
+  $("chatEmpty").hidden = false;
+  show("chat");
   loadConversations();
   $("q").focus();
 };
 
-// ---------------------------------------------------------------- vault map ---
-// Deliberately hand-rolled rather than d3: the no-CDN rule is not negotiable, and a force
-// layout for a personal vault is ~40 lines. Good enough beats a dependency here.
-let mapLoaded = false;
-
+// --------------------------------------------------------------- vault map ---
+// Hand-rolled rather than d3: the no-CDN rule is not negotiable, and a force layout for a
+// personal vault is ~40 lines. Good enough beats a dependency here.
 function drawGraph(data) {
   const svg = $("map");
-  const W = svg.clientWidth || 800, H = svg.clientHeight || 480;
-  const nodes = data.nodes.map((n, i) => ({
+  const W = svg.clientWidth || 800, H = svg.clientHeight || 520;
+  const nodes = (data.nodes || []).map((n, i) => ({
     ...n,
     // Seeded on a circle rather than at random: a deterministic start means the same vault
     // draws the same way twice, which matters more than looking organic.
-    x: W/2 + Math.cos(i * 2.399) * Math.min(W, H) * 0.3,
-    y: H/2 + Math.sin(i * 2.399) * Math.min(W, H) * 0.3,
+    x: W / 2 + Math.cos(i * 2.399) * Math.min(W, H) * 0.3,
+    y: H / 2 + Math.sin(i * 2.399) * Math.min(W, H) * 0.3,
     vx: 0, vy: 0,
   }));
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
-  const edges = data.edges.filter(e => byId[e.source] && byId[e.target]);
+  const edges = (data.edges || []).filter(e => byId[e.source] && byId[e.target]);
+
+  // Repulsion scales with the space each node has to itself. A constant tuned for thirty
+  // notes packs three into a dot in the middle of an empty canvas, which reads as a bug.
+  const repulsion = Math.max(1400, (W * H) / Math.max(nodes.length, 2) / 3.2);
+  const springs = Math.min(0.012, 0.05 / Math.max(nodes.length, 3));
 
   for (let step = 0; step < 260; step++) {
     for (const a of nodes) {
       for (const b of nodes) {
         if (a === b) continue;
         const dx = a.x - b.x, dy = a.y - b.y;
-        const d2 = Math.max(dx*dx + dy*dy, 40);
-        const f = 1400 / d2;
+        const d2 = Math.max(dx * dx + dy * dy, 40);
+        const f = repulsion / d2;
         a.vx += dx * f * 0.02; a.vy += dy * f * 0.02;
       }
-      a.vx += (W/2 - a.x) * 0.004;      // gravity, or disconnected notes drift off-canvas
-      a.vy += (H/2 - a.y) * 0.004;
+      a.vx += (W / 2 - a.x) * 0.004;   // gravity, or disconnected notes drift off-canvas
+      a.vy += (H / 2 - a.y) * 0.004;
     }
     for (const e of edges) {
       const a = byId[e.source], b = byId[e.target];
       const dx = b.x - a.x, dy = b.y - a.y;
-      a.vx += dx * 0.012; a.vy += dy * 0.012;
-      b.vx -= dx * 0.012; b.vy -= dy * 0.012;
+      a.vx += dx * springs; a.vy += dy * springs;
+      b.vx -= dx * springs; b.vy -= dy * springs;
     }
     for (const n of nodes) {
-      n.x = Math.max(24, Math.min(W - 24, n.x + (n.vx *= 0.82)));
-      n.y = Math.max(24, Math.min(H - 24, n.y + (n.vy *= 0.82)));
+      n.x = Math.max(26, Math.min(W - 26, n.x + (n.vx *= 0.82)));
+      n.y = Math.max(26, Math.min(H - 26, n.y + (n.vy *= 0.82)));
     }
   }
 
+  // Yoyo's own pages get their own colour. "My note" and "Yoyo's page about me" must never
+  // look alike — that confusion is the whole reason memory pages are barred from search.
   const colour = (n) => !n.exists ? "transparent"
+                      : n.generated ? "var(--violet)"
                       : n.empty ? "var(--warn)"
                       : n.in_corpus ? "var(--accent)" : "var(--dim)";
   const parts = [];
@@ -468,57 +866,290 @@ function drawGraph(data) {
   }
   for (const n of nodes) {
     const r = n.exists ? Math.min(18, 7 + Math.sqrt(n.bytes || 0) / 12) : 6;
+    const note = n.generated ? " — written by Yoyo"
+               : n.in_corpus ? " — in corpus" : n.exists ? " — not ingested" : "";
     parts.push(
       `<circle cx="${n.x}" cy="${n.y}" r="${r}" fill="${colour(n)}"
         stroke="${n.exists ? "none" : "var(--bad)"}" stroke-dasharray="3 2"
         ${n.path ? `data-note="${esc(n.path)}" style="cursor:pointer"` : ""}>
-        <title>${esc(n.title)}${n.exists ? "" : " (linked but not written)"}${n.empty && n.exists ? " — empty" : ""}${n.in_corpus ? " — in corpus" : n.exists ? " — not ingested" : ""}</title>
+        <title>${esc(n.title)}${n.exists ? "" : " (linked but not written)"}${
+          n.empty && n.exists ? " — empty" : ""}${note}</title>
       </circle>`,
-      `<text x="${n.x}" y="${n.y + r + 12}" text-anchor="middle" font-size="11"
-        fill="var(--dim)" pointer-events="none">${esc(n.title.slice(0, 22))}</text>`);
+      `<text x="${n.x}" y="${n.y + r + 13}" text-anchor="middle" font-size="11"
+        fill="var(--dim)" pointer-events="none">${esc(String(n.title).slice(0, 22))}</text>`);
   }
   svg.innerHTML = parts.join("");
 }
 
 async function loadMap() {
   try {
-    const r = await fetch("/vault/graph");
-    const data = await r.json();
-    if (!r.ok) { $("mapStats").textContent = data.detail || "no vault configured"; return; }
-    const st = data.stats;
-    $("mapStats").innerHTML =
-      `${st.notes} notes · ${st.links} links · ${st.in_corpus} in corpus`
-      + (st.empty ? ` · <span style="color:var(--warn)">${st.empty} empty</span>` : "")
-      + (st.missing ? ` · <span style="color:var(--bad)">${st.missing} linked but not written</span>` : "")
-      + (st.notes && !st.links ? ` — <span style="color:var(--dim)">no [[wikilinks]] yet</span>` : "");
+    const data = await api("/vault/graph");
+    const st = data.stats || {};
+    $("mapTiles").innerHTML =
+      tile("Your notes", st.notes ?? 0, `${st.in_corpus ?? 0} ingested into the corpus`) +
+      tile("Links", st.links ?? 0, st.notes && !st.links ? "no [[wikilinks]] yet" : "") +
+      tile("Yoyo's pages", st.generated ?? 0, "shown here, invisible to search") +
+      tile("Loose ends", (st.empty ?? 0) + (st.missing ?? 0),
+           `${st.empty ?? 0} empty · ${st.missing ?? 0} linked but not written`);
     drawGraph(data);
-    mapLoaded = true;
   } catch (err) {
-    $("mapStats").textContent = String(err);
+    $("mapTiles").innerHTML = `<div class="empty">${esc(String(err.message || err))}</div>`;
+    $("map").innerHTML = "";
   }
 }
 
 $("map").addEventListener("click", (e) => {
   const path = e.target.closest("circle")?.dataset?.note;
-  if (path) { $("srcTitle").textContent = path; $("srcBody").textContent = "loading…";
-              $("src").showModal();
-              fetch(`/citation/${encodeURIComponent(path)}`).then(r => r.json())
-                .then(j => { $("srcBody").textContent = j.text || j.detail || "(empty)"; }); }
+  if (path) openSource(path);
 });
 
-for (const tab of document.querySelectorAll(".tab")) {
-  tab.onclick = () => {
-    document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t === tab));
-    const map = tab.dataset.view === "map";
-    $("mapWrap").hidden = !map;
-    $("turns").hidden = map;
-    $("ask").hidden = map;
-    if (map && !mapLoaded) loadMap();
-  };
+// ------------------------------------------------------------------- jobs ---
+// A job is a row on the server, so this is a view of state rather than an owner of it.
+// Reload mid-eval and the log replays; nothing is lost because the page went away.
+let watching = null;
+
+async function refreshJobs() {
+  let rows = [];
+  try {
+    rows = (await api("/jobs?limit=20")).jobs || [];
+  } catch (err) {
+    // "Could not load" and "nothing here" are different sentences. Conflating them is the
+    // same mistake as reporting an absence you never established.
+    $("jobList").innerHTML =
+      `<div class="empty bad-t">Could not load jobs: ${esc(String(err.message || err))}</div>`;
+    return;
+  }
+
+  $("jobList").innerHTML = rows.length ? `<table class="grid">
+    <tr><th>id</th><th>kind</th><th>status</th><th>when</th><th></th></tr>` +
+    rows.map(j => `<tr>
+      <td class="muted">${j.id}</td><td>${esc(j.kind)}</td>
+      <td class="${j.status === "failed" ? "bad-t" : j.status === "done" ? "ok-t" : "muted"}">${
+        ["queued", "running"].includes(j.status) ? '<span class="spin"></span> ' : ""}${esc(j.status)}</td>
+      <td class="muted">${esc(when(j.started_at || j.created_at))}</td>
+      <td><button class="tiny" data-watch="${j.id}">view log</button>${
+        ["queued", "running"].includes(j.status)
+          ? ` <button class="tiny danger" data-cancel="${j.id}">stop</button>` : ""}</td>
+    </tr>`).join("") + "</table>"
+    : `<div class="empty">No jobs yet. Run doctor, eval or bench above.</div>`;
+
+  $("jobList").querySelectorAll("[data-watch]").forEach(b =>
+    b.onclick = () => watch(Number(b.dataset.watch)));
+  $("jobList").querySelectorAll("[data-cancel]").forEach(b => b.onclick = async () => {
+    try { await post(`/jobs/${b.dataset.cancel}/cancel`); refreshJobs(); }
+    catch (err) { toast(String(err.message || err), "bad", "Could not stop that job"); }
+  });
+
+  const done = rows.filter(j => j.status === "done");
+  renderEvalHistory(done.filter(j => j.kind === "eval"));
+  renderBenchHistory(done.filter(j => j.kind === "bench"));
+  const lastDoctor = done.find(j => j.kind === "doctor");
+  if (lastDoctor) renderDoctor(lastDoctor);
 }
 
+function watch(id) {
+  if (watching) { watching.close(); watching = null; }
+  const box = $("jobLog");
+  box.hidden = false;
+  box.textContent = "";
+  box.scrollIntoView({behavior: "smooth", block: "nearest"});
+  // EventSource is fine here: the stream is a GET with no body, and GETs are not gated.
+  watching = new EventSource(`/jobs/${id}/stream`);
+  const append = (line) => { box.textContent += line + "\n"; box.scrollTop = box.scrollHeight; };
+  watching.addEventListener("log", e => append(JSON.parse(e.data).line ?? ""));
+  watching.addEventListener("status", e => append(`— ${JSON.parse(e.data).status}`));
+  watching.addEventListener("done", e => {
+    const d = JSON.parse(e.data);
+    append(`— finished: ${d.status}`);
+    if (d.error) append(d.error);
+    if (d.status === "failed") toast(d.error || "see the log below", "bad", `Job ${id} failed`);
+    watching.close(); watching = null;
+    refreshJobs();
+    if (view === "memory") loadProposals();
+  });
+  watching.onerror = () => { if (watching) { watching.close(); watching = null; } };
+}
+
+async function runJob(kind, args, button) {
+  const label = button && button.textContent;
+  if (button) { button.disabled = true; button.textContent = "starting…"; }
+  try {
+    const {job_id} = await post("/jobs", {kind, args: args || {}});
+    toast(`${kind} started as job ${job_id}. It keeps running if you close this tab.`,
+          "good", "Started");
+    if (view !== "health") show("health");
+    await refreshJobs();
+    watch(job_id);
+  } catch (err) {
+    toast(String(err.message || err), "bad", `Could not start ${kind}`);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = label; }
+  }
+}
+
+document.querySelectorAll("[data-job]").forEach(b => b.onclick = () => {
+  const j = JSON.parse(b.dataset.job);
+  runJob(j.kind, j.args, b);
+});
+
+$("runEval").onclick = (e) => runJob("eval", {
+  only: $("evalOnly").value || null,
+  role: $("evalRole").value.trim() || null,
+}, e.currentTarget);
+
+$("runBench").onclick = (e) => runJob("bench", {
+  role: $("benchRole").value.trim() || "supervisor",
+  concurrency: $("benchConc").value.split(",").map(n => Number(n.trim())).filter(Boolean),
+  repeats: Number($("benchRepeats").value) || 1,
+  host_note: $("benchNote").value.trim(),
+}, e.currentTarget);
+
+function renderDoctor(job) {
+  const checks = (job.result || {}).checks || [];
+  $("doctorWhen").textContent = job.finished_at ? `last run ${when(job.finished_at)}` : "";
+  $("doctorTable").innerHTML = checks.length ? `<table class="grid">` + checks.map(c =>
+    `<tr><td>${esc(c.name)}</td>
+     <td class="${c.ok ? "ok-t" : "bad-t"}">${c.ok ? "PASS" : "FAIL"}</td>
+     <td class="muted">${esc(c.detail)}</td></tr>`).join("") + `</table>` : "";
+}
+
+function renderEvalHistory(runs) {
+  if (!runs.length) {
+    $("evalHistory").innerHTML = `<div class="empty">No eval runs yet.</div>`;
+    return;
+  }
+  // Per-case columns across runs. The value is not "did it pass" — that is one number — it
+  // is "has this case changed its mind", which needs more than one run side by side.
+  const ids = [];
+  for (const r of runs) for (const c of (r.result || {}).cases || []) if (!ids.includes(c.id)) ids.push(c.id);
+  $("evalHistory").innerHTML = `<table class="grid">
+    <tr><th>when</th><th>role</th><th>score</th>${ids.map(i => `<th>${esc(i)}</th>`).join("")}</tr>` +
+    runs.map(r => {
+      const res = r.result || {};
+      const by = Object.fromEntries((res.cases || []).map(c => [c.id, c.passed]));
+      return `<tr><td class="muted">${esc(when(r.finished_at))}</td>
+        <td>${esc(res.role || "default")}</td>
+        <td class="${res.ok ? "ok-t" : "bad-t"}">${res.passed}/${res.total}</td>` +
+        ids.map(i => `<td class="${by[i] === undefined ? "muted" : by[i] ? "ok-t" : "bad-t"}">${
+          by[i] === undefined ? "–" : by[i] ? "pass" : "FAIL"}</td>`).join("") + `</tr>`;
+    }).join("") + `</table>`;
+}
+
+function renderBenchHistory(runs) {
+  if (!runs.length) {
+    $("benchHistory").innerHTML = `<div class="empty">No bench runs yet.</div>`;
+    return;
+  }
+  const rows = [];
+  for (const r of runs) for (const row of (r.result || {}).rows || [])
+    rows.push({when: r.finished_at, role: (r.result || {}).role,
+               note: (r.result || {}).host_note || "", ...row});
+  $("benchHistory").innerHTML = `<table class="grid">
+    <tr><th>when</th><th>role</th><th>conc</th><th>aggregate tok/s</th><th>per stream</th>
+        <th>scaling</th><th>429s</th><th>host state</th></tr>` +
+    rows.map(r => `<tr><td class="muted">${esc(when(r.when))}</td><td>${esc(r.role || "")}</td>
+      <td>${r.concurrency}</td><td>${r.aggregate_tok_s}</td><td>${r.per_stream_tok_s}</td>
+      <td>${r.scaling ?? "–"}</td><td>${r.rate_limited || 0}</td>
+      <td class="muted">${esc(r.note)}</td></tr>`).join("") + `</table>`;
+}
+
+// ----------------------------------------------------------------- memory ---
+async function loadProposals() {
+  let data;
+  try {
+    data = await api("/memory/proposals");
+  } catch (err) {
+    $("proposals").innerHTML =
+      `<div class="empty bad-t">Could not load the queue: ${esc(String(err.message || err))}</div>`;
+    return;
+  }
+  const rows = data.pending || [];
+  const st = data.stats || {};
+
+  // The approval rate is the number worth watching. Near 1.0 means it is proposing the
+  // obvious; near 0 means noise you will soon stop reading. Neither shows up in "how many
+  // memories do I have".
+  const rate = st.approval_rate;
+  $("memTiles").innerHTML =
+    tile("Waiting on you", st.pending ?? 0, rows.length ? "review below" : "nothing to do") +
+    tile("Approved", st.approved ?? 0, "not yet written") +
+    tile("Written", st.written ?? 0, "pages in your vault") +
+    tile("Approval rate", rate === null || rate === undefined ? "–" : rate,
+         rate === null || rate === undefined ? "nothing decided yet"
+         : rate > 0.9 ? "very high — proposing the obvious?"
+         : rate < 0.2 ? "very low — extraction may be noise" : "healthy");
+
+  $("memBadge").hidden = !(st.pending > 0);
+  $("memBadge").textContent = st.pending || 0;
+
+  if (!rows.length) {
+    $("proposals").innerHTML = `<div class="empty">Nothing pending. For a real conversation
+      that is a finding, not a bug — read it as "no durable facts here".</div>`;
+    return;
+  }
+
+  // Grouped by subject, because a reviewer judges a person, not a sentence. Rejecting a
+  // whole subject was exactly the judgement the first real run needed.
+  const bySubject = {};
+  for (const r of rows) (bySubject[r.subject] ||= []).push(r);
+
+  $("proposals").innerHTML = Object.entries(bySubject).map(([subject, claims]) => `
+    <section class="subject">
+      <header>
+        <b>${esc(subject)}</b>
+        <span class="kind">${esc(claims[0].kind)} · ${claims.length} claim(s)</span>
+        <span class="acts">
+          <button class="tiny good" data-subject="${esc(subject)}" data-status="approved">keep all</button>
+          <button class="tiny danger" data-subject="${esc(subject)}" data-status="rejected">drop all</button>
+        </span>
+      </header>
+      ${claims.map(c => `<div class="claim">
+        <div class="txt">${esc(c.claim)}</div>
+        <div class="ev">${esc(c.source)} — "${esc(String(c.quote || "").slice(0, 240))}"</div>
+        <div class="acts">
+          <button class="tiny good" data-id="${c.id}" data-status="approved">keep</button>
+          <button class="tiny danger" data-id="${c.id}" data-status="rejected">drop</button>
+        </div>
+      </div>`).join("")}
+    </section>`).join("");
+
+  $("proposals").querySelectorAll("[data-id]").forEach(b => b.onclick = async () => {
+    try {
+      await post(`/memory/proposals/${b.dataset.id}`, {status: b.dataset.status});
+      loadProposals();
+    } catch (err) { toast(String(err.message || err), "bad", "Could not record that"); }
+  });
+  $("proposals").querySelectorAll("[data-subject]").forEach(b => b.onclick = async () => {
+    try {
+      await post("/memory/proposals/subject",
+                 {subject: b.dataset.subject, status: b.dataset.status});
+      loadProposals();
+    } catch (err) { toast(String(err.message || err), "bad", "Could not record that"); }
+  });
+}
+
+$("applyMemory").onclick = async (e) => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  try {
+    const r = await post("/memory/apply", {});
+    toast(r.claims
+      ? `Wrote ${r.claims} claim(s) across ${r.pages} page(s).` +
+        (r.flagged ? ` ${r.flagged} possible contradiction(s) flagged — both kept.` : "")
+      : "Nothing approved yet — keep some claims first.",
+      r.claims ? "good" : "warn", r.claims ? "Memory updated" : "Nothing to write");
+    loadProposals();
+  } catch (err) {
+    toast(String(err.message || err), "bad", "Could not write memory");
+  } finally {
+    b.disabled = false;
+  }
+};
+
+// ------------------------------------------------------------------- boot ---
 health();
 loadConversations();
+loadProposals();          // populates the sidebar badge even while the tab is closed
 setInterval(health, 60000);
 </script>
 </body>

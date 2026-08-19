@@ -154,6 +154,77 @@ def test_the_readme_does_not_document_commands_that_do_not_exist(readme):
     assert not invented, f"README §6 documents commands that do not exist: {sorted(invented)}"
 
 
+def _flags_for(command: str) -> set[str] | None:
+    """Every `--flag` a command accepts, or None if the command does not exist."""
+    import inspect
+
+    from yoyo.cli import app
+
+    parts = command.split()
+    commands = list(app.registered_commands)
+    if len(parts) == 2:
+        group = next((g for g in app.registered_groups if g.name == parts[0]), None)
+        if group is None:
+            return None
+        commands = list(group.typer_instance.registered_commands)
+    leaf = parts[-1]
+
+    target = next(
+        (c for c in commands
+         if (c.name or c.callback.__name__.replace("_", "-")) == leaf), None)
+    if target is None:
+        return None
+
+    flags: set[str] = {"--help"}
+    for name, param in inspect.signature(target.callback).parameters.items():
+        default = param.default
+        decls = getattr(default, "param_decls", None) or ()
+        flags.update(d for d in decls if d.startswith("--"))
+        if not decls:
+            flags.add("--" + name.replace("_", "-"))
+        # Typer renders a bool option as `--flag/--no-flag` unless told otherwise.
+        if param.annotation is bool and not decls:
+            flags.add("--no-" + name.replace("_", "-"))
+    return flags
+
+
+def test_every_flag_the_readme_shows_actually_exists(readme):
+    """The gap the command-list check could not see.
+
+    §4 told the owner to run `yoyo memory build --dry-run` for two days before that flag
+    existed. Checking command *names* is not enough — a documented flag that does not exist
+    is the same failure one level down, and it surfaces as an error at the exact moment the
+    reader is trusting the doc most.
+    """
+    unknown: list[str] = []
+    for command, flag in re.findall(
+        r"yoyo ([a-z][a-z-]*(?: [a-z][a-z-]*)?)((?: +--[a-z][a-z-]*)+)", readme
+    ):
+        known = _flags_for(command)
+        if known is None:
+            continue  # not a real command; the command-name tests cover that
+        for one in flag.split():
+            if one not in known:
+                unknown.append(f"yoyo {command} {one}")
+    assert not unknown, f"README shows flags that do not exist: {sorted(set(unknown))}"
+
+
+def test_every_role_named_in_a_readme_command_exists(readme, models):
+    """`yoyo bench --role coder_supervisor` was in §4 for a day. It is a plausible name — it
+    was the candidate's name before ADR-027 promoted it — and the role registry has never
+    had it, so the command exits 2 the moment anyone follows the doc.
+
+    Same class as the flag check one level along: the command exists, the flag exists, and
+    the *value* is from a world that no longer does.
+    """
+    known = set(models["roles"])
+    named = set(re.findall(r"--role[= ]([a-z_][a-z_0-9]*)", readme))
+    # Placeholders in syntax examples are not claims about a real role.
+    named -= {"name", "role", "n"}
+    unknown = sorted(named - known)
+    assert not unknown, f"README names roles that do not exist: {unknown} (known: {sorted(known)})"
+
+
 def test_the_status_table_command_count_is_right(readme):
     m = re.search(r"\| CLI \((\d+) commands\)", readme)
     assert m, "README §3 no longer states a command count"

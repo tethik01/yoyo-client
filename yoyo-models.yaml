@@ -29,9 +29,19 @@ roles:
   # --- tool-capable ------------------------------------------------------------
   # PROMOTED 2026-08-15 (ADR-027): qwen3-coder-next passed all four hard gates 7/7 and
   # runs at 50 tok/s against agent's 11.7 — 4.3x faster single-stream, and no thinking
-  # tokens to pay for. It SERIALISES (1.09x @ 4) where agent scales (3.76x), which costs
-  # the graph its fan-out benefit but not the single-agent path, where nearly all real
-  # use lives.
+  # tokens to pay for.
+  #
+  # SCALING — CORRECTED 2026-08-15 (later). This block said "SERIALISES (1.09x @ 4), which
+  # costs the graph its fan-out benefit". Re-measured over 3 repeats after setting
+  # OLLAMA_MAX_LOADED_MODELS=3 and OLLAMA_KEEP_ALIVE=30m on the box: **3.75x @ 4** —
+  # 14.8 -> 55.5 aggregate tok/s, four requests in the same wall clock as one (20.2s ->
+  # 20.5s). `coder` scales, and the graph's fan-out DOES pay on it.
+  #
+  # What changed is not established. The likeliest cause is that the original single-trial
+  # run was contaminated by model eviction under memory pressure — 92 GB of weights against
+  # 121 GB usable, with the old 5-minute keep-alive — so what was recorded as "the model
+  # serialises" may have been "the model was being unloaded between requests". That is a
+  # hypothesis. What is measured is the 3.75x.
   supervisor:
     endpoint: coder        # qwen3-coder-next, 80B-A3B MoE, ~50 tok/s, no thinking mode
     tools: true
